@@ -1,0 +1,333 @@
+{
+  "week": 2,
+  "mode": "FastAPI · TaskIQ · uv",
+  "title": "Build a Modern Python API, Worker & Container",
+  "subtitle": "Use uv, typed requests, async database I/O, a stream queue, tests, and a reproducible non-root image.",
+  "phase": "Foundations",
+  "analogy": "The API is the order counter, the stream is the order rail, the worker prepares the order, and PostgreSQL records the completed receipt. Returning 202 means the order was accepted, not served.",
+  "objectives": [
+    "Explain type hints, validation, async/await, modules, and context managers.",
+    "Run the same application as an HTTP API and a background worker.",
+    "Trace a JSON request through the queue into PostgreSQL.",
+    "Test behavior and build an image from a real uv.lock."
+  ],
+  "prerequisites": [
+    "Complete Chapter 1 and copy its pyproject.toml.",
+    "Docker is running and ports 5432, 6379 and 8001 are available."
+  ],
+  "lessons": [
+    {
+      "title": "Python fundamentals in the application",
+      "body": [
+        "`class JobRequest(BaseModel)` defines a typed data model. `Field(min_length=1)` adds runtime validation; a plain annotation alone would not do that. Decorators such as `@app.post` and `@broker.task` register functions with a framework.",
+        "An async function returns a coroutine. `await` lets the event loop run other work while an asynchronous operation waits. It does not make CPU-heavy Python code parallel. Use a process or job system for expensive CPU work, and never call blocking database/network APIs inside an async handler."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Why both an API and a worker?",
+      "body": [
+        "HTTP requests should not hold a connection open for long-running jobs. The API validates input, queues it, and returns a job ID. A separate worker imports the registered task and writes a result later. This lesson processes text locally; adding an LLM or object-store integration is an extension, not a hidden requirement."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Connections, transactions and migrations",
+      "body": [
+        "The API borrows a pooled connection using `async with`; the worker opens its own connection. Successful transaction contexts commit; failures roll back. Parameterized SQL prevents values from becoming SQL syntax.",
+        "Run the initial schema command before starting services. CREATE TABLE IF NOT EXISTS is only an initial migration, not an evolving schema strategy. For later changes adopt versioned migrations, for example Alembic with SQLAlchemy."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Reliability has several layers",
+      "body": [
+        "Stream acknowledgement does not mean exactly-once delivery. Configure retry/reclaim behavior and a dead-letter policy before production; test a worker crash with your broker version. PostgreSQL deduplicates repeats of a particular job ID, but separate retries of POST /enqueue receive different IDs.",
+        "This lab also lacks authentication, per-user authorization, rate limits and a transactional outbox. Add those before exposing real customer data. No fixed latency or container-density guarantees are assumed."
+      ],
+      "bullets": []
+    }
+  ],
+  "handHoldingSteps": [
+    "Copy the app package, tests, Dockerfile and compose.yaml into the repository root using the exact paths shown. Keep pyproject.toml and uv.lock at that root, not inside app/.",
+    "Run Ruff and pytest before starting Docker. The HTTP unit tests mock the queue and do not need a running database.",
+    "Run `docker compose up --build -d`. Compose waits for healthy PostgreSQL and Redis, runs the migration, then starts API and worker from the same image.",
+    "Open http://localhost:8001/docs. POST a JSON prompt, keep its job_id, then GET /jobs after the simulated work finishes. Follow the worker logs to connect HTTP acceptance to database commit.",
+    "For host-side debugging, start only postgres/redis, copy .env.example to .env, run the migration and launch API and worker in separate terminals. Stop any existing container API/worker first so two workers do not consume the same lab stream unexpectedly."
+  ],
+  "concepts": [
+    "Lifespan: The startup/shutdown context owns connections; avoid resource creation during import.",
+    "Async I/O: await relinquishes the event loop while I/O waits; it does not remove latency or parallelize CPU-bound code.",
+    "HTTP contract: 202 means queued, 422 means input validation failed, and 503 means the enqueue attempt failed.",
+    "Idempotent persistence: A primary-key conflict can prevent duplicate writes for one job ID; it does not create a distributed exactly-once system."
+  ],
+  "commands": [
+    {
+      "command": "uv sync --locked\nuv run --locked ruff check .\nuv run --locked ruff format --check .\nuv run --locked pytest",
+      "explanation": "Install from the lockfile and run the quality gate. During development use uv run ruff format . to apply formatting.",
+      "expected": "Four HTTP tests pass; lint and format checks exit successfully."
+    },
+    {
+      "command": "docker compose config --quiet\ndocker compose up --build -d\ndocker compose ps -a\ndocker compose logs --tail=50 migrate worker api",
+      "explanation": "Validate Compose, build once per service cache, start, and inspect health/migration output.",
+      "expected": "Migration exits 0; API, worker, database and Redis remain running."
+    },
+    {
+      "command": "curl -i http://localhost:8001/health\ncurl -i http://localhost:8001/ready\ncurl -i -X POST http://localhost:8001/enqueue \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"prompt\":\"hello modern Python\"}'\nsleep 3\ncurl -s http://localhost:8001/jobs",
+      "explanation": "Exercise the JSON body contract, then observe eventual completion. A slow machine may need another poll.",
+      "expected": "202 with job_id, followed by a row whose word_count is 3."
+    },
+    {
+      "command": "docker compose exec postgres psql -U appuser -d appdb -c \"SELECT job_id, word_count FROM job_logs;\"\ndocker compose logs -f worker",
+      "explanation": "Inspect persisted rows and stream logs. Ctrl+C leaves containers running.",
+      "expected": "The same job ID appears in the database and completion log."
+    },
+    {
+      "command": "docker compose stop api worker\ndocker compose up -d postgres redis\nuv run --locked python -m app.migrate\nuv run --locked uvicorn app.main:app --reload --port 8001\n# In a second terminal, from the same root:\nuv run --locked taskiq worker app.tasks:broker",
+      "explanation": "Alternative host workflow using .env. --reload is for local development only.",
+      "expected": "The API and worker use the same local database and queue as Compose."
+    },
+    {
+      "command": "docker compose down\n# Optional reset: permanently remove this local lab’s database and queue data.\ndocker compose down -v",
+      "explanation": "Stop containers normally; use the second command only when you intentionally want an empty local lab.",
+      "expected": "down preserves named volumes; down -v removes them."
+    }
+  ],
+  "codeFiles": [
+    {
+      "filename": "app/__init__.py",
+      "code": "\"\"\"API and worker share this application package.\"\"\"\n",
+      "language": "python",
+      "description": "Mark app as an importable Python package.",
+      "walkthrough": []
+    },
+    {
+      "filename": "app/config.py",
+      "code": "from functools import lru_cache\n\nfrom psycopg.conninfo import make_conninfo\nfrom pydantic import SecretStr\nfrom pydantic_settings import BaseSettings, SettingsConfigDict\n\n\nclass Settings(BaseSettings):\n    model_config = SettingsConfigDict(env_file=\".env\", extra=\"ignore\")\n\n    redis_url: str = \"redis://localhost:6379/0\"\n    db_host: str = \"localhost\"\n    db_port: int = 5432\n    db_name: str = \"appdb\"\n    db_user: str = \"appuser\"\n    db_password: SecretStr = SecretStr(\"local-dev-only\")\n    db_sslmode: str = \"disable\"  # Local only; AWS sets require.\n\n    @property\n    def conninfo(self) -> str:\n        # Quote special characters correctly; never log this string.\n        return make_conninfo(\n            host=self.db_host,\n            port=self.db_port,\n            dbname=self.db_name,\n            user=self.db_user,\n            password=self.db_password.get_secret_value(),\n            sslmode=self.db_sslmode,\n            connect_timeout=5,\n        )\n\n\n@lru_cache\ndef get_settings() -> Settings:\n    return Settings()\n",
+      "language": "python",
+      "description": "Typed, environment-driven settings shared by API and worker.",
+      "walkthrough": [
+        {
+          "title": "Settings(BaseSettings)",
+          "explanation": "Fields provide types and local defaults. Environment variables override them; SecretStr redacts ordinary representations, but get_secret_value explicitly exposes the value to the database driver."
+        },
+        {
+          "title": "conninfo",
+          "explanation": "make_conninfo escapes connection fields correctly. This avoids breaking database passwords containing @, : or /. Never log the resulting string."
+        },
+        {
+          "title": "@lru_cache",
+          "explanation": "Load settings once per process, rather than reading configuration for every request."
+        }
+      ]
+    },
+    {
+      "filename": "app/db.py",
+      "code": "from psycopg.rows import dict_row\nfrom psycopg_pool import AsyncConnectionPool\n\nfrom app.config import get_settings\n\n# Each API process owns its own small pool; construction opens no sockets.\npool = AsyncConnectionPool(\n    conninfo=get_settings().conninfo,\n    min_size=1,\n    max_size=5,\n    open=False,\n    kwargs={\"row_factory\": dict_row},\n)\n",
+      "language": "python",
+      "description": "A small asynchronous connection pool owned by each API process.",
+      "walkthrough": [
+        {
+          "title": "open=False",
+          "explanation": "Importing the module performs no network I/O. FastAPI lifespan opens the pool and closes it on shutdown."
+        },
+        {
+          "title": "max_size=5",
+          "explanation": "Two API processes can use up to ten pooled connections, before worker and migration connections. Scale with the database connection budget in mind."
+        }
+      ]
+    },
+    {
+      "filename": "app/broker.py",
+      "code": "from taskiq_redis import RedisStreamBroker\n\nfrom app.config import get_settings\n\n# Streams support acknowledgement; Redis persistence is a separate concern.\nbroker = RedisStreamBroker(url=get_settings().redis_url)\n",
+      "language": "python",
+      "description": "Connect TaskIQ to a Redis-compatible stream broker.",
+      "walkthrough": [
+        {
+          "title": "RedisStreamBroker",
+          "explanation": "Streams support acknowledgement. That is different from durable Redis storage, replication and retry/reclaim policy; production systems need all of these considered."
+        }
+      ]
+    },
+    {
+      "filename": "app/tasks.py",
+      "code": "import asyncio\nimport logging\nfrom uuid import UUID\n\nimport psycopg\n\nfrom app.broker import broker\nfrom app.config import get_settings\n\nlogger = logging.getLogger(__name__)\n\n\n@broker.task\nasync def process_ai_job(job_id: str, prompt: str) -> None:\n    \"\"\"A deterministic stand-in for slow external I/O, not an actual LLM call.\"\"\"\n    await asyncio.sleep(2)\n    word_count = len(prompt.split())\n    # The worker uses its own async connection, not the API's connection pool.\n    async with await psycopg.AsyncConnection.connect(get_settings().conninfo) as conn:\n        await conn.execute(\n            \"\"\"\n            INSERT INTO job_logs (job_id, prompt, word_count)\n            VALUES (%s, %s, %s)\n            ON CONFLICT (job_id) DO NOTHING\n            \"\"\",\n            (UUID(job_id), prompt, word_count),\n        )\n    # A successful context exit commits; exceptions cause rollback.\n    logger.info(\"job_completed job_id=%s word_count=%s\", job_id, word_count)\n",
+      "language": "python",
+      "description": "The background worker turns a prompt into a persisted word-count result.",
+      "walkthrough": [
+        {
+          "title": "@broker.task",
+          "explanation": "Registers a Python coroutine as a remotely queued task. Importing app.tasks in the worker registers it with the same broker object."
+        },
+        {
+          "title": "await asyncio.sleep(2)",
+          "explanation": "Simulates waiting for slow I/O. It is not an LLM call and does not block the event loop like time.sleep would. Real external HTTP calls need an async client, timeouts and error handling."
+        },
+        {
+          "title": "Parameterized SQL",
+          "explanation": "%s placeholders pass values separately from SQL. ON CONFLICT makes a repeated delivery of the same job_id harmless for this database write; it does not deduplicate two separate HTTP submissions."
+        }
+      ]
+    },
+    {
+      "filename": "app/main.py",
+      "code": "from contextlib import asynccontextmanager\nfrom uuid import UUID, uuid4\n\nfrom fastapi import FastAPI, HTTPException\nfrom pydantic import BaseModel, Field\n\nfrom app.broker import broker\nfrom app.db import pool\nfrom app.tasks import process_ai_job\n\n\n@asynccontextmanager\nasync def lifespan(app: FastAPI):\n    await pool.open(wait=True)\n    try:\n        await broker.startup()\n        try:\n            yield\n        finally:\n            await broker.shutdown()\n    finally:\n        await pool.close()\n\n\napp = FastAPI(title=\"Backend Bootcamp\", lifespan=lifespan)\n\n\nclass JobRequest(BaseModel):\n    prompt: str = Field(min_length=1, max_length=2000)\n\n\nclass JobAccepted(BaseModel):\n    job_id: UUID\n    status: str = \"queued\"\n\n\n@app.get(\"/health\")\nasync def health() -> dict[str, str]:\n    # Liveness: the process can serve HTTP. No external dependency checks.\n    return {\"status\": \"ok\"}\n\n\n@app.get(\"/ready\")\nasync def ready() -> dict[str, str]:\n    async with pool.connection() as conn:\n        await conn.execute(\"SELECT 1\")\n    return {\"status\": \"ready\"}\n\n\n@app.post(\"/enqueue\", status_code=202, response_model=JobAccepted)\nasync def enqueue(payload: JobRequest) -> JobAccepted:\n    job_id = uuid4()\n    try:\n        await process_ai_job.kiq(str(job_id), payload.prompt)\n    except Exception as exc:\n        raise HTTPException(503, \"Queue unavailable; try again later\") from exc\n    return JobAccepted(job_id=job_id)\n\n\n@app.get(\"/jobs\")\nasync def list_jobs():\n    async with pool.connection() as conn:\n        cursor = await conn.execute(\n            \"SELECT job_id, prompt, word_count, created_at \"\n            \"FROM job_logs ORDER BY created_at DESC LIMIT 20\"\n        )\n        return {\"jobs\": await cursor.fetchall()}\n",
+      "language": "python",
+      "description": "A typed HTTP API using lifespan instead of deprecated startup event decorators.",
+      "walkthrough": [
+        {
+          "title": "lifespan",
+          "explanation": "Open the pool and broker before serving requests; release both on shutdown. The finally blocks also release the pool when broker startup fails."
+        },
+        {
+          "title": "JobRequest and JobAccepted",
+          "explanation": "Pydantic validates JSON input and documents output in OpenAPI. Empty or oversized prompts produce 422; accepted jobs return 202 because work is unfinished."
+        },
+        {
+          "title": "enqueue",
+          "explanation": "Generate a stable job ID, await only the enqueue operation, and return without waiting for the slow job. A queue error becomes 503; it is not an acknowledgement of completed work."
+        },
+        {
+          "title": "/health, /ready, /jobs",
+          "explanation": "Liveness checks the HTTP process; readiness checks PostgreSQL. /jobs queries completed results with an async pooled connection. Readiness does not currently check queue connectivity."
+        }
+      ]
+    },
+    {
+      "filename": "app/migrate.py",
+      "code": "\"\"\"One initial, repeatable lab migration; run before starting API or workers.\"\"\"\n\nimport asyncio\n\nimport psycopg\n\nfrom app.config import get_settings\n\n\nasync def main() -> None:\n    async with await psycopg.AsyncConnection.connect(get_settings().conninfo) as conn:\n        await conn.execute(\"\"\"\n            CREATE TABLE IF NOT EXISTS job_logs (\n                job_id UUID PRIMARY KEY,\n                prompt TEXT NOT NULL,\n                word_count INTEGER NOT NULL,\n                created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n            )\n        \"\"\")\n    print(\"Initial schema ready\")\n\n\nif __name__ == \"__main__\":\n    asyncio.run(main())\n",
+      "language": "python",
+      "description": "Run the initial SQL schema once as a separate deployment step.",
+      "walkthrough": [
+        {
+          "title": "CREATE TABLE IF NOT EXISTS",
+          "explanation": "This makes the initial lab setup repeatable. It does not migrate an existing table when columns change; versioned migrations are required as the app evolves."
+        },
+        {
+          "title": "asyncio.run",
+          "explanation": "A command-line entry point runs the coroutine and waits for it to finish before returning an exit code."
+        }
+      ]
+    },
+    {
+      "filename": "tests/test_api.py",
+      "code": "from unittest.mock import AsyncMock\n\nimport pytest\nfrom httpx import ASGITransport, AsyncClient\n\nfrom app.main import app\nfrom app.tasks import process_ai_job\n\npytestmark = pytest.mark.anyio\n\n\n@pytest.fixture\ndef anyio_backend():\n    return \"asyncio\"\n\n\n@pytest.fixture\nasync def client(monkeypatch):\n    monkeypatch.setattr(process_ai_job, \"kiq\", AsyncMock())\n    # ASGITransport deliberately skips lifespan for isolated HTTP contract tests.\n    # Integration tests must exercise real startup, Redis, and PostgreSQL too.\n    async with AsyncClient(\n        transport=ASGITransport(app=app), base_url=\"http://test\"\n    ) as session:\n        yield session\n\n\nasync def test_health(client):\n    response = await client.get(\"/health\")\n    assert response.json() == {\"status\": \"ok\"}\n\n\nasync def test_enqueue_returns_202_and_calls_queue(client):\n    response = await client.post(\"/enqueue\", json={\"prompt\": \"hello uv\"})\n    assert response.status_code == 202\n    body = response.json()\n    assert body[\"status\"] == \"queued\"\n    process_ai_job.kiq.assert_awaited_once_with(body[\"job_id\"], \"hello uv\")\n\n\nasync def test_empty_prompt_is_rejected(client):\n    response = await client.post(\"/enqueue\", json={\"prompt\": \"\"})\n    assert response.status_code == 422\n\n\nasync def test_queue_outage_is_503(client):\n    process_ai_job.kiq.side_effect = ConnectionError(\"Redis offline\")\n    response = await client.post(\"/enqueue\", json={\"prompt\": \"hello\"})\n    assert response.status_code == 503\n",
+      "language": "python",
+      "description": "Async HTTP contract tests with HTTPX ASGITransport. They mock the queue and deliberately skip lifespan.",
+      "walkthrough": [
+        {
+          "title": "AsyncMock",
+          "explanation": "Assert that valid input calls the queue with the returned job ID. Test invalid input and queue failure separately."
+        },
+        {
+          "title": "Integration boundary",
+          "explanation": "These tests do not prove Redis, PostgreSQL or lifespan work. The Compose and curl checks below cover the full request-to-result path."
+        }
+      ]
+    },
+    {
+      "filename": "Dockerfile",
+      "code": "# syntax=docker/dockerfile:1\nFROM python:3.13-slim AS build\nCOPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /usr/local/bin/uv\nWORKDIR /workspace\nENV UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0\nCOPY pyproject.toml uv.lock ./\nRUN --mount=type=cache,target=/root/.cache/uv \\\n    uv sync --locked --no-dev --no-install-project\n\nFROM python:3.13-slim AS runtime\nRUN useradd --create-home --uid 10001 appuser\nWORKDIR /workspace\nENV PATH=\"/workspace/.venv/bin:$PATH\" \\\n    PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1\nCOPY --from=build /workspace/.venv ./.venv\nCOPY --chown=appuser:appuser app ./app\nUSER appuser\nEXPOSE 8000\nCMD [\"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]\n",
+      "language": "docker",
+      "description": "Build one locked runtime environment and run the final container as a non-root user.",
+      "walkthrough": [
+        {
+          "title": "Build stage",
+          "explanation": "uv sync --locked --no-dev installs only runtime dependencies. Layering the manifest and lockfile before source enables dependency caching."
+        },
+        {
+          "title": "Runtime stage",
+          "explanation": "Copy the virtual environment and app without uv or development tools. PATH resolves uvicorn/taskiq from that virtual environment."
+        },
+        {
+          "title": "Single image",
+          "explanation": "ECS and Compose change only the startup command for API, worker or migration. Build and promote the same image digest for all roles."
+        }
+      ]
+    },
+    {
+      "filename": "compose.yaml",
+      "code": "x-app: &app\n  build: .\n  image: backend-bootcamp:dev\n  environment:\n    REDIS_URL: redis://redis:6379/0\n    DB_HOST: postgres\n    DB_PORT: \"5432\"\n    DB_NAME: appdb\n    DB_USER: appuser\n    DB_PASSWORD: local-dev-only\n    DB_SSLMODE: disable\n\nservices:\n  postgres:\n    image: postgres:17-alpine\n    environment:\n      POSTGRES_USER: appuser\n      POSTGRES_PASSWORD: local-dev-only\n      POSTGRES_DB: appdb\n    ports: [\"127.0.0.1:5432:5432\"]\n    volumes: [\"postgres-data:/var/lib/postgresql/data\"]\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U appuser -d appdb\"]\n      interval: 5s\n      timeout: 3s\n      retries: 20\n  redis:\n    image: redis:7.4-alpine\n    command: [\"redis-server\", \"--appendonly\", \"yes\"]\n    ports: [\"127.0.0.1:6379:6379\"]\n    volumes: [\"redis-data:/data\"]\n    healthcheck:\n      test: [\"CMD\", \"redis-cli\", \"ping\"]\n      interval: 5s\n      timeout: 3s\n      retries: 20\n  migrate:\n    <<: *app\n    command: [\"python\", \"-m\", \"app.migrate\"]\n    depends_on:\n      postgres: {condition: service_healthy}\n  api:\n    <<: *app\n    ports: [\"127.0.0.1:8001:8000\"]\n    depends_on:\n      migrate: {condition: service_completed_successfully}\n      redis: {condition: service_healthy}\n  worker:\n    <<: *app\n    command: [\"taskiq\", \"worker\", \"app.tasks:broker\"]\n    depends_on:\n      migrate: {condition: service_completed_successfully}\n      redis: {condition: service_healthy}\n\nvolumes:\n  postgres-data:\n  redis-data:\n",
+      "language": "yaml",
+      "description": "Healthy dependencies, a one-shot migration, then API and worker.",
+      "walkthrough": [
+        {
+          "title": "Service DNS",
+          "explanation": "Containers use postgres and redis as hostnames. The host uses localhost through published ports. localhost inside the API container refers to that container, not PostgreSQL."
+        },
+        {
+          "title": "depends_on conditions",
+          "explanation": "Wait for database health and successful migration before starting API/worker. This controls startup order, not ongoing outage recovery."
+        },
+        {
+          "title": "Ports and volumes",
+          "explanation": "The API uses host port 8001 to avoid colliding with the course reader on 8000. Named volumes persist data after docker compose down; down -v deletes them."
+        }
+      ]
+    }
+  ],
+  "svgDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 460\" role=\"img\" aria-label=\"Local application process and data flow\" class=\"course-diagram\"><title>Local application process and data flow</title><defs><marker id=\"graph-arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"15\" y=\"45\" width=\"930\" height=\"160\" rx=\"14\" class=\"diagram-boundary\"/><text x=\"31\" y=\"70\" class=\"diagram-group\">SEPARATE PROCESSES · API + WORKER SHARE SOURCE, NOT CONNECTIONS</text><path d=\"M270,138 L360,138\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"315\" y=\"120\" class=\"diagram-edge-label\" text-anchor=\"middle\">Produce job</text><path d=\"M690,138 L600,138\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"645\" y=\"120\" class=\"diagram-edge-label\" text-anchor=\"middle\">Consume</text><path d=\"M150,176 L150,378 L360,378\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"220\" y=\"285\" class=\"diagram-edge-label\" text-anchor=\"middle\">Read completed rows</text><path d=\"M810,176 L810,270 L480,270 L480,340\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"635\" y=\"260\" class=\"diagram-edge-label\" text-anchor=\"middle\">Write result</text><path d=\"M690,378 L600,378\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"645\" y=\"360\" class=\"diagram-edge-label\" text-anchor=\"middle\">Create schema</text><rect x=\"30\" y=\"100\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"150.0\" y=\"131\" text-anchor=\"middle\" class=\"diagram-title\">FastAPI process</text><text x=\"150.0\" y=\"153\" text-anchor=\"middle\" class=\"diagram-detail\">Pydantic + async pool</text><rect x=\"360\" y=\"100\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"480.0\" y=\"131\" text-anchor=\"middle\" class=\"diagram-title\">Redis stream</text><text x=\"480.0\" y=\"153\" text-anchor=\"middle\" class=\"diagram-detail\">Messages + acknowledgement</text><rect x=\"690\" y=\"100\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"810.0\" y=\"131\" text-anchor=\"middle\" class=\"diagram-title\">TaskIQ process</text><text x=\"810.0\" y=\"153\" text-anchor=\"middle\" class=\"diagram-detail\">Same image · different command</text><rect x=\"360\" y=\"340\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"480.0\" y=\"371\" text-anchor=\"middle\" class=\"diagram-title\">PostgreSQL</text><text x=\"480.0\" y=\"393\" text-anchor=\"middle\" class=\"diagram-detail\">job_logs · primary-key dedupe</text><rect x=\"690\" y=\"340\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"810.0\" y=\"371\" text-anchor=\"middle\" class=\"diagram-title\">Migration process</text><text x=\"810.0\" y=\"393\" text-anchor=\"middle\" class=\"diagram-detail\">One-shot schema setup</text></svg>",
+  "architectureDescription": "The API and worker are separate processes from one image. Both reach PostgreSQL; only the API produces jobs and only workers consume them. Redis-compatible Streams decouple their lifetimes.",
+  "flowDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Flow 2\" class=\"course-diagram\"><title>Flow 2</title><defs><marker id=\"arrow-Flow2\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">POST /enqueue</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Validate JSON</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Queue job</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Stable job_id</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Return 202</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Do not wait for work</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Worker consumes</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Simulated slow I/O</text><rect x=\"300\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Commit result</text><text x=\"420\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">ON CONFLICT by job_id</text><rect x=\"25\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">GET /jobs</text><text x=\"145\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Read completed results</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow2)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow2)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow2)\"/><path d=\"M575,237 L540,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow2)\"/><path d=\"M300,237 L265,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow2)\"/></svg>",
+  "flowDescription": "POST /enqueue → Queue job → Return 202 → Worker consumes → Commit result → GET /jobs.",
+  "breakItDrill": {
+    "title": "Stop the worker, keep the API",
+    "scenario": "Run `docker compose stop worker`, then submit a valid prompt.",
+    "symptom": "The API can return 202, but a new result does not appear until a worker processes the queued job.",
+    "fix": "Start the worker again and verify the same job ID reaches PostgreSQL. Do not confuse a queue acceptance response with completion."
+  },
+  "assignment": {
+    "title": "Test idempotent persistence",
+    "description": "Invoke the registered task twice with the same job_id using a local test script; query the database and explain why only one row is stored. Then explain why repeating an HTTP request is a different case.",
+    "completionHint": "Verify the result yourself, then complete the chapter checklist."
+  },
+  "recallNote": {
+    "keyTakeaway": "Use typed boundaries, asynchronous I/O, and an explicit lifecycle; keep accepted work separate from completed work.",
+    "bullets": [
+      "API: `uvicorn app.main:app`; worker: `taskiq worker app.tasks:broker`.",
+      "Containers share an image, not an event loop or database connection.",
+      "Commit uv.lock; build with --locked; keep development dependencies out of runtime."
+    ]
+  },
+  "badgeTone": "amber",
+  "sources": [
+    {
+      "label": "FastAPI lifespan",
+      "url": "https://fastapi.tiangolo.com/advanced/events/"
+    },
+    {
+      "label": "Pydantic settings",
+      "url": "https://fastapi.tiangolo.com/advanced/settings/"
+    },
+    {
+      "label": "TaskIQ Redis stream broker",
+      "url": "https://github.com/taskiq-python/taskiq-redis"
+    },
+    {
+      "label": "Psycopg pools",
+      "url": "https://www.psycopg.org/psycopg3/docs/advanced/pool.html"
+    },
+    {
+      "label": "uv in Docker",
+      "url": "https://docs.astral.sh/uv/guides/integration/docker/"
+    }
+  ],
+  "checklist": [
+    {
+      "id": "w1-c1",
+      "text": "Explain type hints, validation, async/await, modules, and context managers."
+    },
+    {
+      "id": "w1-c2",
+      "text": "Run the same application as an HTTP API and a background worker."
+    },
+    {
+      "id": "w1-c3",
+      "text": "Trace a JSON request through the queue into PostgreSQL."
+    },
+    {
+      "id": "w1-c4",
+      "text": "Test behavior and build an image from a real uv.lock."
+    }
+  ]
+}

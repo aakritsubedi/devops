@@ -1,0 +1,176 @@
+{
+  "week": 10,
+  "mode": "CloudWatch · ECS Exec · SSM",
+  "title": "Operate, Diagnose & Tear Down with Confidence",
+  "subtitle": "Use job IDs, logs, service events and metrics to explain failures, then clean up every lab resource deliberately.",
+  "phase": "Build & Operate",
+  "analogy": "A useful runbook is a map from a visible symptom to evidence. Logs tell a story, metrics show patterns, and a shell is an investigative tool—not the first fix for every alert.",
+  "objectives": [
+    "Follow a failed request or job across the system.",
+    "Distinguish container, host, network and data failures.",
+    "Create an alert and confirm its notification destination.",
+    "Review destruction and verify both IaC and manual resources afterward."
+  ],
+  "prerequisites": [
+    "A deployed lab with logs and at least one completed job.",
+    "The Session Manager plugin is needed for interactive ECS Exec/SSM commands. Install it for your platform using the official guide."
+  ],
+  "lessons": [
+    {
+      "title": "Start with evidence, not restarts",
+      "body": [
+        "For HTTP failures, check ALB target health, API logs and database reachability. For missing results, keep the returned job_id, inspect worker logs and queue-consumer state, and query PostgreSQL. A healthy /health endpoint does not prove background processing works.",
+        "Correlate timestamps and stable job IDs across logs. Do not log credentials or full sensitive prompts. The lab’s completion log records the ID and count only."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Container shell versus host session",
+      "body": [
+        "ECS Exec enters a running container using the task role’s ssmmessages permissions and a caller authorized to execute-command. Enabling Exec affects newly launched tasks, not existing tasks retroactively.",
+        "SSM start-session enters an EC2 host using its SSM agent/profile and the caller’s session permissions. Fargate exposes no host shell. Grant and audit interactive access deliberately; never open port 22 just to make a shell work."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "An alarm needs a delivery path",
+      "body": [
+        "The example alerts when ALB target 5xx count exceeds 5 in each of two one-minute evaluation periods. It uses notBreaching for missing data; low traffic therefore does not itself alarm. This metric does not cover queue backlog or every ALB-generated error.",
+        "Create and confirm an SNS subscription and test delivery. A configured topic with no confirmed subscriber does not notify a human. A production runbook should connect alerts to a clear owner and response action."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Destruction is a data decision",
+      "body": [
+        "Terraform destroy removes only resources in this state, not manually created stacks. The lab allows deleting database data without a final snapshot and deleting ECR images; do not copy those choices to data you need to retain.",
+        "Inspect the destroy plan, take any required backups, and keep the separate state bucket until recovery/audit needs are resolved. NAT Elastic IPs, snapshots, retained logs, untracked resources and separate manual labs can continue incurring charges."
+      ],
+      "bullets": []
+    }
+  ],
+  "handHoldingSteps": [
+    "Copy infra/08-alarms.tf, review/apply the plan and subscribe a real address to the SNS topic. Confirm the subscription before assuming alerts work.",
+    "List tasks and inspect stopped reasons/service events before opening a shell. Follow CloudWatch logs and correlate a job_id across API acceptance and worker completion.",
+    "Use ECS Exec only when needed. If operating the optional EC2 worker, use SSM for host inspection; a host shell and a container shell show different process/network contexts.",
+    "Verify rollback behavior with a deliberately bad image/health configuration in the isolated lab. Keep a known-good SHA and a database-compatible recovery plan.",
+    "Review a saved destroy plan using the preserved input settings and the correct account. Apply only after deciding whether database/cache data must be retained.",
+    "Verify state is empty, inspect project-tagged resources and manually inspect the earlier bootcamp-manual stack. Remove local Compose resources separately; retain or deliberately clean up the separate state bucket."
+  ],
+  "concepts": [
+    "Logs vs metrics: Logs explain individual events; metrics and alarms identify patterns that deserve investigation.",
+    "Container vs host: ECS Exec and SSM enter different execution environments and use different permissions.",
+    "Teardown scope: Empty Terraform state does not prove that the AWS account contains no billable resources."
+  ],
+  "commands": [
+    {
+      "command": "CLUSTER=$(terraform -chdir=infra output -raw cluster_name)\naws ecs describe-services --cluster \"$CLUSTER\" --services bootcamp-iac-api\naws logs tail /ecs/bootcamp-iac --since 10m --follow",
+      "explanation": "Inspect service events and recent logs. Ctrl+C stops following logs without stopping services.",
+      "expected": "Useful startup, deployment or completion evidence."
+    },
+    {
+      "command": "TASK_ARN=$(aws ecs list-tasks --cluster \"$CLUSTER\" --service-name bootcamp-iac-api --query 'taskArns[0]' --output text)\naws ecs execute-command --cluster \"$CLUSTER\" --task \"$TASK_ARN\" --container api --interactive --command /bin/sh",
+      "explanation": "Requires Session Manager plugin, Exec enabled on the task, suitable caller permissions and running SSM channels. Avoid printing the whole environment because it includes a password.",
+      "expected": "A shell inside the API container; exit returns to your local terminal."
+    },
+    {
+      "command": "INSTANCE_ID=$(aws ec2 describe-instances --filters Name=tag:aws:autoscaling:groupName,Values=bootcamp-iac-hosts Name=instance-state-name,Values=running --query 'Reservations[0].Instances[0].InstanceId' --output text)\naws ssm start-session --target \"$INSTANCE_ID\"",
+      "explanation": "Only for worker_on_ec2=true and a registered SSM-managed host. Inside the host, inspect sudo docker ps.",
+      "expected": "An EC2 host session, not a Fargate host session."
+    },
+    {
+      "command": "TOPIC_ARN=$(terraform -chdir=infra output -raw alerts_topic_arn)\naws sns subscribe --topic-arn \"$TOPIC_ARN\" --protocol email --notification-endpoint YOUR_EMAIL\n# Confirm the email link, then test delivery:\naws sns publish --topic-arn \"$TOPIC_ARN\" --message \"Bootcamp test notification\"",
+      "explanation": "Replace YOUR_EMAIL and confirm the subscription; check delivery before relying on the alarm.",
+      "expected": "A confirmed subscriber receives the test message."
+    },
+    {
+      "command": "aws sts get-caller-identity\nterraform -chdir=infra plan -destroy -out=destroy.tfplan\nterraform -chdir=infra show destroy.tfplan\n# After reviewing backups, account and resource scope:\nterraform -chdir=infra apply destroy.tfplan\nterraform -chdir=infra state list",
+      "explanation": "The preserved auto.tfvars file also supplies the required OIDC input if Chapter 9 is installed. Review before applying: this lab deletes its database without a final snapshot.",
+      "expected": "State list is empty after successful destruction."
+    },
+    {
+      "command": "aws resourcegroupstaggingapi get-resources --tag-filters Key=Project,Values=bootcamp-iac\naws ec2 describe-nat-gateways --filter Name=state,Values=available\naws ec2 describe-addresses\naws rds describe-db-instances\ndocker compose down",
+      "explanation": "Read-only post-destroy inspection; not every resource type appears in the tagging API. Separately remove manual lab resources and review any retained snapshots/logs/state bucket.",
+      "expected": "No unintended lab resources remain; local volumes persist unless deliberately removed."
+    }
+  ],
+  "codeFiles": [
+    {
+      "filename": "infra/08-alarms.tf",
+      "code": "resource \"aws_sns_topic\" \"alerts\" {\n  name = \"${var.project_name}-alerts\"\n}\nresource \"aws_cloudwatch_metric_alarm\" \"server_errors\" {\n  alarm_name          = \"${var.project_name}-target-5xx\"\n  namespace           = \"AWS/ApplicationELB\"\n  metric_name         = \"HTTPCode_Target_5XX_Count\"\n  statistic           = \"Sum\"\n  period              = 60\n  evaluation_periods  = 2\n  comparison_operator = \"GreaterThanThreshold\"\n  threshold           = 5\n  treat_missing_data  = \"notBreaching\"\n  alarm_actions       = [aws_sns_topic.alerts.arn]\n  dimensions          = { LoadBalancer = aws_lb.main.arn_suffix }\n}\noutput \"alerts_topic_arn\" {\n  value = aws_sns_topic.alerts.arn\n}\n",
+      "language": "hcl",
+      "description": "A symptom-based alarm and SNS destination; the email subscription is a separate deliberate step.",
+      "walkthrough": [
+        {
+          "title": "Metric dimensions",
+          "explanation": "LoadBalancer uses the ALB ARN suffix, not its full ARN. The target-5xx metric describes errors returned by application targets."
+        },
+        {
+          "title": "Evaluation and missing data",
+          "explanation": "Two one-minute evaluation periods reduce reaction to isolated errors. notBreaching avoids treating absent traffic as application failure."
+        },
+        {
+          "title": "Delivery",
+          "explanation": "alarm_actions targets SNS. Subscribe and confirm a destination; the topic alone does not deliver email."
+        }
+      ]
+    }
+  ],
+  "svgDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Architecture 10\" class=\"course-diagram\"><title>Architecture 10</title><defs><marker id=\"arrow-Architecture\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">ALB health + metrics</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">User-facing symptoms</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">CloudWatch logs</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">API / worker evidence</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">ECS Exec</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Container inspection</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">SSM session</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Optional EC2 host</text><rect x=\"300\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">SNS subscriber</text><text x=\"420\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Confirmed notification</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M575,237 L540,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/></svg>",
+  "architectureDescription": "ALB metrics and container logs provide evidence. ECS Exec and SSM inspect different boundaries. SNS connects an alarm to a confirmed human notification destination.",
+  "flowDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Flow 10\" class=\"course-diagram\"><title>Flow 10</title><defs><marker id=\"arrow-Flow10\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Observe symptom</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Keep job_id + time</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Inspect events</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Task + target health</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Read logs</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Locate failing stage</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Verify recovery</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Repeat business path</text><rect x=\"300\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Review destroy</text><text x=\"420\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Data + state scope</text><rect x=\"25\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Audit leftovers</text><text x=\"145\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Manual + IaC resources</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow10)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow10)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow10)\"/><path d=\"M575,237 L540,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow10)\"/><path d=\"M300,237 L265,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow10)\"/></svg>",
+  "flowDescription": "Observe symptom → Inspect events → Read logs → Verify recovery → Review destroy → Audit leftovers.",
+  "breakItDrill": {
+    "title": "Prove notification delivery",
+    "scenario": "Publish a test message before confirming the email subscription.",
+    "symptom": "The topic exists but no confirmed destination receives the message.",
+    "fix": "Confirm the subscription, publish again and document the delivered message."
+  },
+  "assignment": {
+    "title": "Create your operations runbook",
+    "description": "Write separate procedures for API 503, accepted-but-unfinished jobs, unhealthy targets, failed secret injection and safe teardown. Include commands, expected evidence and a verification step for each.",
+    "completionHint": "Verify the result yourself, then complete the chapter checklist."
+  },
+  "recallNote": {
+    "keyTakeaway": "An operation is complete when the user-visible path works and the evidence confirms why.",
+    "bullets": [
+      "Use stable job IDs for correlation.",
+      "An alarm without a confirmed subscriber is incomplete.",
+      "ECS Exec enters a container; SSM enters an EC2 host.",
+      "Destroy only removes managed objects in the selected state."
+    ]
+  },
+  "badgeTone": "indigo",
+  "sources": [
+    {
+      "label": "ECS Exec",
+      "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-exec.html"
+    },
+    {
+      "label": "Session Manager plugin",
+      "url": "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+    },
+    {
+      "label": "CloudWatch alarms",
+      "url": "https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/AlarmThatSendsEmail.html"
+    }
+  ],
+  "checklist": [
+    {
+      "id": "w9-c1",
+      "text": "Follow a failed request or job across the system."
+    },
+    {
+      "id": "w9-c2",
+      "text": "Distinguish container, host, network and data failures."
+    },
+    {
+      "id": "w9-c3",
+      "text": "Create an alert and confirm its notification destination."
+    },
+    {
+      "id": "w9-c4",
+      "text": "Review destruction and verify both IaC and manual resources afterward."
+    }
+  ]
+}

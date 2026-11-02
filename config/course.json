@@ -1,0 +1,24 @@
+{
+  "title": "Modern Backend Engineering — uv, Python, AWS & Terraform",
+  "name": "Backend Engineering",
+  "tagline": "First commit → cloud",
+  "logoText": "tf",
+  "chapterUnit": "Chapter",
+  "durationUnit": "Chapters",
+  "storage": {
+    "progressKey": "autoscaling_bootcamp_progress_v2",
+    "themeKey": "autoscaling_bootcamp_theme"
+  },
+  "chapters": [
+    "chapters/00-repository-foundations.json",
+    "chapters/01-python-docker.json",
+    "chapters/02-networking.json",
+    "chapters/03-data-iam.json",
+    "chapters/04-ecs-fargate.json",
+    "chapters/05-ecs-ec2.json",
+    "chapters/06-autoscaling.json",
+    "chapters/07-terraform.json",
+    "chapters/08-cicd.json",
+    "chapters/09-operations.json"
+  ]
+}

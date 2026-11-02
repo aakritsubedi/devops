@@ -1,0 +1,141 @@
+{
+  "week": 6,
+  "mode": "AL2023 · EC2 · Capacity",
+  "title": "Understand the Host: ECS on EC2 & Capacity Providers",
+  "subtitle": "See what Fargate manages for you by operating an ECS-optimized EC2 worker host.",
+  "phase": "Build & Operate",
+  "analogy": "ECS is the scheduler, EC2 is the building, and a capacity provider arranges more buildings when the scheduler needs space. Adding workers and adding hosts are separate actions.",
+  "objectives": [
+    "Explain host capacity versus service desired count.",
+    "Register an ECS-optimized Amazon Linux host.",
+    "Compare bridge and awsvpc networking without assuming fixed container density.",
+    "Separate instance profile, execution role and task role."
+  ],
+  "prerequisites": [
+    "The Fargate API and worker should already work.",
+    "The Terraform chapter includes an optional worker_on_ec2 switch; you can use it instead of repeating manual setup."
+  ],
+  "lessons": [
+    {
+      "title": "The EC2 host has its own lifecycle",
+      "body": [
+        "Use the ECS-optimized Amazon Linux 2023 AMI from the regional SSM public parameter. Its ECS agent registers the host using ECS_CLUSTER. Attach the ECS instance role and SSM core policy through an instance profile.",
+        "An EC2 instance can exist without being registered to your cluster. Check registered container instances as well as the EC2 running state. Treat hosts as replaceable and update their AMIs deliberately."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Capacity is constrained in several dimensions",
+      "body": [
+        "CPU, memory, ephemeral storage, network-interface limits, daemon overhead and instance-type features all affect placement. A t3.small does not imply a guaranteed number of containers.",
+        "Bridge networking uses the host network stack and avoids one task ENI per container. awsvpc gives task-level networking. If you expose a bridge-mode API, use dynamic host ports, instance target groups and matching ALB-to-host rules; our EC2 worker exposes no inbound application port."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Roles and credential boundaries",
+      "body": [
+        "The instance profile lets the host agent register and pull/start tasks. Execution-role overrides are needed for some EC2 agent features such as awslogs. Runtime application permissions belong on the task role.",
+        "Using bridge networking requires extra care around instance metadata access. Require IMDSv2, restrict task access to host credentials, and review ECS task IAM guidance before production. Containers on one host are not a strong tenant-isolation boundary."
+      ],
+      "bullets": []
+    }
+  ],
+  "handHoldingSteps": [
+    "Manual alternative: create a host role with AmazonEC2ContainerServiceforEC2Role and AmazonSSMManagedInstanceCore, then create an instance profile for it.",
+    "Create a launch template with the SSM-selected ECS AL2023 AMI, t3.small, app-sg, IMDSv2 required, the instance profile and the user-data script below.",
+    "Create an ASG in private subnets and wait for ECS registration. Create a capacity provider linked to that ASG, enable managed scaling, and associate it with the ECS cluster.",
+    "Use a bridge-mode EC2 worker definition based on the same image/settings as Fargate, command taskiq worker app.tasks:broker, and no inbound port mapping. Select its capacity provider on the worker service.",
+    "Scale the old Fargate worker service down once the EC2 worker is healthy. Do not change the API’s Fargate service while learning host placement."
+  ],
+  "concepts": [
+    "Service scaling: Adds task replicas. Capacity scaling: Adds hosts capable of placing those replicas.",
+    "Bridge mode: Container addresses and published host ports differ; an unexposed worker requires no ALB.",
+    "Three roles: Host instance profile, startup execution role, and runtime task role solve different permission problems."
+  ],
+  "commands": [
+    {
+      "command": "aws ssm get-parameter --name /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id --query Parameter.Value --output text",
+      "explanation": "Discover the current regional AMI. Review and roll host changes deliberately instead of treating latest as an unreviewed production release.",
+      "expected": "An ami-… identifier for this region."
+    },
+    {
+      "command": "aws ecs list-container-instances --cluster bootcamp-manual-cluster\naws ecs describe-services --cluster bootcamp-manual-cluster --services YOUR_WORKER_SERVICE",
+      "explanation": "Inspect registration and service placement events.",
+      "expected": "A container instance ARN and useful scheduler diagnostics."
+    },
+    {
+      "command": "aws ec2 describe-instances --filters Name=instance-state-name,Values=running --query 'Reservations[].Instances[].[InstanceId,InstanceType,PrivateIpAddress]'",
+      "explanation": "Read host inventory; it is separate from ECS task inventory.",
+      "expected": "The private worker host is running in the expected subnet."
+    }
+  ],
+  "codeFiles": [
+    {
+      "filename": "ec2-user-data.sh",
+      "code": "#!/bin/bash\necho ECS_CLUSTER=bootcamp-manual-cluster >> /etc/ecs/ecs.config\necho ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true >> /etc/ecs/ecs.config\n",
+      "description": "Use only on the ECS-optimized AMI with an instance profile. This is first-boot host configuration.",
+      "language": "bash",
+      "walkthrough": []
+    },
+    {
+      "filename": "infra/06-ec2.tf",
+      "code": "data \"aws_ssm_parameter\" \"ecs_ami\" {\n  name = \"/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id\"\n}\nresource \"aws_iam_role\" \"host\" {\n  name = \"${var.project_name}-host\"\n  assume_role_policy = jsonencode({\n    Version = \"2012-10-17\"\n    Statement = [{\n      Effect    = \"Allow\", Action = \"sts:AssumeRole\",\n      Principal = { Service = \"ec2.amazonaws.com\" }\n    }]\n  })\n}\nresource \"aws_iam_role_policy_attachment\" \"host\" {\n  for_each = toset([\n    \"arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role\",\n    \"arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore\"\n  ])\n  role       = aws_iam_role.host.name\n  policy_arn = each.value\n}\nresource \"aws_iam_instance_profile\" \"host\" {\n  role = aws_iam_role.host.name\n}\nresource \"aws_launch_template\" \"host\" {\n  image_id               = data.aws_ssm_parameter.ecs_ami.value\n  instance_type          = \"t3.small\"\n  vpc_security_group_ids = [aws_security_group.app.id]\n  iam_instance_profile {\n    arn = aws_iam_instance_profile.host.arn\n  }\n  metadata_options {\n    http_tokens = \"required\"\n  }\n  user_data = base64encode(<<-USERDATA\n    #!/bin/bash\n    echo ECS_CLUSTER=${aws_ecs_cluster.main.name} >> /etc/ecs/ecs.config\n    echo ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true >> /etc/ecs/ecs.config\n  USERDATA\n  )\n}\nresource \"aws_autoscaling_group\" \"host\" {\n  name                = \"${var.project_name}-hosts\"\n  min_size            = var.worker_on_ec2 ? 1 : 0\n  max_size            = var.worker_on_ec2 ? 4 : 0\n  desired_capacity    = var.worker_on_ec2 ? 1 : 0\n  vpc_zone_identifier = aws_subnet.private[*].id\n  launch_template {\n    id      = aws_launch_template.host.id\n    version = aws_launch_template.host.latest_version\n  }\n  tag {\n    key                 = \"AmazonECSManaged\"\n    value               = \"true\"\n    propagate_at_launch = true\n  }\n  lifecycle {\n    ignore_changes = [desired_capacity]\n  }\n  depends_on = [aws_iam_role_policy_attachment.host, aws_route_table_association.private]\n}\nresource \"aws_ecs_capacity_provider\" \"ec2\" {\n  name = \"${var.project_name}-ec2\"\n  auto_scaling_group_provider {\n    auto_scaling_group_arn = aws_autoscaling_group.host.arn\n    managed_scaling {\n      status          = \"ENABLED\"\n      target_capacity = 80\n    }\n  }\n}\nresource \"aws_ecs_cluster_capacity_providers\" \"main\" {\n  cluster_name       = aws_ecs_cluster.main.name\n  capacity_providers = [\"FARGATE\", aws_ecs_capacity_provider.ec2.name]\n}\nresource \"aws_ecs_task_definition\" \"worker_ec2\" {\n  family                   = \"${var.project_name}-worker-ec2\"\n  network_mode             = \"bridge\"\n  requires_compatibilities = [\"EC2\"]\n  cpu                      = \"256\"\n  memory                   = \"512\"\n  execution_role_arn       = aws_iam_role.execution.arn\n  task_role_arn            = aws_iam_role.task.arn\n  # Same application and secrets; only the launch compatibility differs.\n  container_definitions = aws_ecs_task_definition.app[\"worker\"].container_definitions\n}\nresource \"aws_ecs_service\" \"worker_ec2\" {\n  count                  = var.enable_services && var.worker_on_ec2 ? 1 : 0\n  name                   = \"${var.project_name}-worker-ec2\"\n  cluster                = aws_ecs_cluster.main.id\n  task_definition        = aws_ecs_task_definition.worker_ec2.arn\n  desired_count          = 1\n  enable_execute_command = true\n  capacity_provider_strategy {\n    capacity_provider = aws_ecs_capacity_provider.ec2.name\n    weight            = 1\n  }\n  depends_on = [aws_ecs_cluster_capacity_providers.main, aws_iam_role_policy.db_secret]\n}\n",
+      "language": "hcl",
+      "description": "Optional Terraform implementation, explained here for reference. Copy this with the full Chapter 8 file set, not by itself.",
+      "walkthrough": []
+    }
+  ],
+  "svgDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Architecture 6\" class=\"course-diagram\"><title>Architecture 6</title><defs><marker id=\"arrow-Architecture\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">ECS scheduler</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Places requested tasks</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Capacity provider</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Links scheduler to ASG</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">EC2 host</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Agent + container runtime</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Worker container</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Same application image</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/></svg>",
+  "architectureDescription": "ECS scheduling demand is connected to an Auto Scaling Group through a capacity provider. The host agent registers available resources; the worker runs inside the host with its own task identity.",
+  "flowDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Flow 6\" class=\"course-diagram\"><title>Flow 6</title><defs><marker id=\"arrow-Flow6\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Worker desired count</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Requested replicas</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Scheduler checks fit</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">CPU + RAM + networking</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Capacity provider</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Host headroom target</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">ASG starts host</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">AMI + instance profile</text><rect x=\"300\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Agent registers</text><text x=\"420\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Cluster membership</text><rect x=\"25\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Worker starts</text><text x=\"145\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Task role + image</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow6)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow6)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow6)\"/><path d=\"M575,237 L540,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow6)\"/><path d=\"M300,237 L265,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow6)\"/></svg>",
+  "flowDescription": "Worker desired count → Scheduler checks fit → Capacity provider → ASG starts host → Agent registers → Worker starts.",
+  "breakItDrill": {
+    "title": "Create insufficient placement capacity",
+    "scenario": "Request more worker tasks than the lab host’s available memory permits, within your lab limits.",
+    "symptom": "Tasks remain pending with placement events; increasing desired count alone cannot create usable memory.",
+    "fix": "Restore a small desired count or increase approved ASG capacity, then wait for host registration."
+  },
+  "assignment": {
+    "title": "Explain a pending task",
+    "description": "Write a diagnostic sequence that checks desired count, placement events, host registration, available memory and instance-profile permissions.",
+    "completionHint": "Verify the result yourself, then complete the chapter checklist."
+  },
+  "recallNote": {
+    "keyTakeaway": "ECS schedules tasks; a capacity provider and ASG supply the hosts.",
+    "bullets": [
+      "No fixed container-per-host guarantee.",
+      "A worker needs queue/database egress, not an ALB listener.",
+      "Use SSM sessions instead of opening SSH."
+    ]
+  },
+  "badgeTone": "amber",
+  "sources": [
+    {
+      "label": "ECS capacity providers",
+      "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/asg-capacity-providers.html"
+    },
+    {
+      "label": "ECS task IAM roles",
+      "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html"
+    }
+  ],
+  "checklist": [
+    {
+      "id": "w5-c1",
+      "text": "Explain host capacity versus service desired count."
+    },
+    {
+      "id": "w5-c2",
+      "text": "Register an ECS-optimized Amazon Linux host."
+    },
+    {
+      "id": "w5-c3",
+      "text": "Compare bridge and awsvpc networking without assuming fixed container density."
+    },
+    {
+      "id": "w5-c4",
+      "text": "Separate instance profile, execution role and task role."
+    }
+  ]
+}

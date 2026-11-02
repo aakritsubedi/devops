@@ -1,0 +1,149 @@
+{
+  "week": 4,
+  "mode": "PostgreSQL · Valkey · IAM",
+  "title": "Data, Secrets & Identity: Who Can Access What?",
+  "subtitle": "Separate database permissions, network access, task startup permissions and application identity.",
+  "phase": "Build & Operate",
+  "analogy": "An execution role is the stage crew that fetches the image and startup secrets. A task role is the badge worn by running application code. Database users are a separate permission system.",
+  "objectives": [
+    "Explain transactions, database schemas and connection limits.",
+    "Keep database/cache endpoints private and encrypt connections.",
+    "Distinguish execution roles, task roles and EC2 instance profiles.",
+    "Inject a managed secret without writing its value into source or Terraform state."
+  ],
+  "prerequisites": [
+    "Network/subnet IDs and security groups from Chapter 3 for the manual path.",
+    "Or read this chapter as preparation and build the complete stack with Terraform in Chapter 8."
+  ],
+  "lessons": [
+    {
+      "title": "PostgreSQL is the source of completed results",
+      "body": [
+        "The job_id primary key identifies a result; a transaction groups database writes into a commit or rollback. The API reads completed results, while the queue tracks pending work. A database is not automatically a queue, and Redis is not the durable record of completed jobs.",
+        "Connection limits matter: each API process has its own pool. Count the maximum pooled connections plus workers, migrations and administrative sessions before increasing task count."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Secrets are values, not strings in Git",
+      "body": [
+        "Use an RDS-managed master password in Secrets Manager. The ECS execution role reads the secret at startup and injects only the password JSON key as DB_PASSWORD. DB_HOST, DB_NAME and DB_USER are ordinary non-secret configuration.",
+        "Injected environment values are a snapshot. Secret rotation does not modify an already running process; deploy replacement tasks with current values. Do not print all environment variables while debugging."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "The three AWS identities",
+      "body": [
+        "The execution role permits image pulls, logs and startup secret retrieval. The task role grants runtime AWS API permissions; our text-processing task needs no S3 permissions. An optional EC2 instance profile lets the host register with ECS and use Systems Manager.",
+        "IAM does not open a network route. A correct role can still fail if private subnets cannot reach ECR, Secrets Manager or CloudWatch. KMS permissions are separate when you choose customer-managed encryption keys."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Lab versus production data access",
+      "body": [
+        "The runnable lab uses the database owner for brevity and a single TLS-enabled Valkey node. A production app should use a restricted SQL role, certificate verification, cache authentication/ACLs, backups and failover.",
+        "DB_SSLMODE=require encrypts the RDS connection but does not provide the identity verification of verify-full. For verify-full, bundle the current RDS CA and set the driver’s root-certificate option. Local Compose intentionally uses unencrypted loopback-bound services."
+      ],
+      "bullets": []
+    }
+  ],
+  "handHoldingSteps": [
+    "Manual path: create an RDS PostgreSQL 17 instance, DB appdb, owner appuser, private subnet group and data-sg. Choose managed master credentials in Secrets Manager and no public access. Record the endpoint and secret ARN; do not copy the secret into a committed file.",
+    "Create a private Redis-compatible Valkey replication group with in-transit encryption and data-sg. A single node is enough for this lab; use rediss://ENDPOINT:6379/0 for the application.",
+    "Create the execution role trusted by ecs-tasks.amazonaws.com with AmazonECSTaskExecutionRolePolicy and a secret retrieval policy scoped to your DB secret ARN. For a customer-managed KMS key, grant decrypt on that key separately.",
+    "Create a task role trusted by ECS tasks. Grant only the four ssmmessages channel actions if you plan to use ECS Exec; there is no need to grant S3 access to an app that never calls S3.",
+    "Use the task-definition fragment below as a reference when entering environment and secret fields in the next chapter. Replace every ARN/endpoint placeholder."
+  ],
+  "concepts": [
+    "Three permission planes: Network groups permit TCP, IAM permits AWS APIs, and SQL roles permit database operations.",
+    "Secret injection: ECS startup reads Secrets Manager under the execution role, not the application task role.",
+    "TLS: rediss selects encrypted Redis transport; database require and verify-full provide different security guarantees."
+  ],
+  "commands": [
+    {
+      "command": "aws secretsmanager describe-secret --secret-id YOUR_DB_SECRET_ARN --query '{ARN:ARN,RotationEnabled:RotationEnabled}'",
+      "explanation": "Inspect metadata only; there is no need to dump the secret value into your terminal history or logs.",
+      "expected": "The intended secret ARN and rotation setting."
+    },
+    {
+      "command": "aws rds describe-db-instances --query 'DBInstances[*].{ID:DBInstanceIdentifier,Public:PubliclyAccessible,Host:Endpoint.Address}'",
+      "explanation": "Check endpoint and public-access status.",
+      "expected": "The database is private and belongs to your lab."
+    },
+    {
+      "command": "docker compose exec postgres psql -U appuser -d appdb -c \"\\d job_logs\"",
+      "explanation": "Revisit the local schema before deploying it to RDS.",
+      "expected": "job_id is a UUID primary key and word_count is an integer."
+    }
+  ],
+  "codeFiles": [
+    {
+      "filename": "execution-secret-policy.json",
+      "code": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Effect\": \"Allow\",\n      \"Action\": [\n        \"secretsmanager:GetSecretValue\"\n      ],\n      \"Resource\": \"YOUR_DB_SECRET_ARN\"\n    }\n  ]\n}\n",
+      "description": "Replace the ARN; attach to the ECS execution role. KMS decrypt would target a KMS key ARN, not a secret ARN.",
+      "language": "json",
+      "walkthrough": []
+    },
+    {
+      "filename": "container-settings.json",
+      "code": "{\n  \"environment\": [\n    {\n      \"name\": \"DB_HOST\",\n      \"value\": \"YOUR_RDS_HOST\"\n    },\n    {\n      \"name\": \"DB_NAME\",\n      \"value\": \"appdb\"\n    },\n    {\n      \"name\": \"DB_USER\",\n      \"value\": \"appuser\"\n    },\n    {\n      \"name\": \"DB_SSLMODE\",\n      \"value\": \"require\"\n    },\n    {\n      \"name\": \"REDIS_URL\",\n      \"value\": \"rediss://YOUR_VALKEY_ENDPOINT:6379/0\"\n    }\n  ],\n  \"secrets\": [\n    {\n      \"name\": \"DB_PASSWORD\",\n      \"valueFrom\": \"YOUR_DB_SECRET_ARN:password::\"\n    }\n  ]\n}\n",
+      "description": "A container settings fragment, not a complete task definition. The :password:: suffix selects a JSON key.",
+      "language": "json",
+      "walkthrough": []
+    }
+  ],
+  "svgDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Architecture 4\" class=\"course-diagram\"><title>Architecture 4</title><defs><marker id=\"arrow-Architecture\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">ECS execution role</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Startup AWS permissions</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Secrets Manager</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">RDS-managed password</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">API / worker task</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">DB_PASSWORD snapshot</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Private PostgreSQL</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">SQL credentials</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/></svg>",
+  "architectureDescription": "At task startup, the execution role reads the managed secret and injects a password. The application then uses database credentials over a private TLS connection; IAM and SQL permissions remain separate.",
+  "flowDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Flow 4\" class=\"course-diagram\"><title>Flow 4</title><defs><marker id=\"arrow-Flow4\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Start task</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Execution role</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Read secret</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Scoped ARN</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Inject DB_PASSWORD</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Container startup</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Connect with TLS</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Database credentials</text><rect x=\"300\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Commit transaction</text><text x=\"420\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">SQL permissions</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow4)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow4)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow4)\"/><path d=\"M575,237 L540,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow4)\"/></svg>",
+  "flowDescription": "Start task → Read secret → Inject DB_PASSWORD → Connect with TLS → Commit transaction.",
+  "breakItDrill": {
+    "title": "Revoke secret retrieval",
+    "scenario": "Temporarily remove GetSecretValue from the manual execution role, then start a new task.",
+    "symptom": "The task stops before application startup with a secret initialization error.",
+    "fix": "Restore the scoped execution-role permission and start a new task; broadening the task role will not fix this startup failure."
+  },
+  "assignment": {
+    "title": "Explain a startup failure",
+    "description": "Write a short runbook distinguishing AccessDenied on secret retrieval, a network timeout to the database, and a SQL authentication failure.",
+    "completionHint": "Verify the result yourself, then complete the chapter checklist."
+  },
+  "recallNote": {
+    "keyTakeaway": "A secret reference can live in code; its plaintext value should not.",
+    "bullets": [
+      "Execution role: pull/log/inject. Task role: application AWS APIs.",
+      "IAM, security groups and SQL users are separate controls.",
+      "Changing a secret requires an explicit refresh/deployment strategy."
+    ]
+  },
+  "badgeTone": "amber",
+  "sources": [
+    {
+      "label": "ECS secret injection",
+      "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specifying-sensitive-data-tutorial.html"
+    },
+    {
+      "label": "RDS password management",
+      "url": "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-secrets-manager.html"
+    }
+  ],
+  "checklist": [
+    {
+      "id": "w3-c1",
+      "text": "Explain transactions, database schemas and connection limits."
+    },
+    {
+      "id": "w3-c2",
+      "text": "Keep database/cache endpoints private and encrypt connections."
+    },
+    {
+      "id": "w3-c3",
+      "text": "Distinguish execution roles, task roles and EC2 instance profiles."
+    },
+    {
+      "id": "w3-c4",
+      "text": "Inject a managed secret without writing its value into source or Terraform state."
+    }
+  ]
+}

@@ -1,0 +1,186 @@
+{
+  "week": 9,
+  "mode": "GitHub Actions · OIDC",
+  "title": "CI, OIDC & Reviewed Releases",
+  "subtitle": "Turn the local quality gate into a pipeline, publish immutable images, and keep infrastructure changes reviewable.",
+  "phase": "Build & Operate",
+  "analogy": "CI is a repeatable inspection station. OIDC is a short-lived admission ticket for that station, scoped to the right repository/environment. A published package still needs a reviewed deployment decision.",
+  "objectives": [
+    "Run locked dependency installation, linting, formatting and tests in CI.",
+    "Explain OIDC trust, audience and subject without long-lived AWS keys.",
+    "Publish a SHA-tagged image with narrowly scoped ECR permissions.",
+    "Use a reviewed Terraform plan for promotion and rollback."
+  ],
+  "prerequisites": [
+    "The Chapter 8 stack and ECR repository exist.",
+    "A GitHub repository with main and a production environment; set environment protection rules if your plan supports them.",
+    "Keep the same state backend and release.auto.tfvars inputs from Chapter 8."
+  ],
+  "lessons": [
+    {
+      "title": "Separate validation, publication and deployment",
+      "body": [
+        "Pull requests run lint and tests without AWS credentials. Only a push to main may run the environment-protected publisher job. It pushes one immutable image; it does not silently apply infrastructure.",
+        "In this learning workflow, CD is a reviewed promotion step using the published SHA in Terraform. A fully automated Terraform deployment needs a protected state backend, serialized applies, separate plan/apply authorization and broader explicitly designed infrastructure permissions; do not reuse the ECR-only role for that."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Trust and permission are two separate policies",
+      "body": [
+        "The OIDC trust policy determines which GitHub identity may assume the publisher role. Its permission policy allows token retrieval and upload only to this ECR repository. The role has no ECS deployment, Terraform or iam:PassRole permissions because this workflow does not perform those operations.",
+        "Use exact aud=sts.amazonaws.com and an exact approved sub. For older repositories a protected environment subject may resemble repo:OWNER/REPO:environment:production. GitHub repositories created after July 15, 2026, or opted into immutable subjects, include immutable owner/repository IDs. Match the format your repository actually uses; do not copy a guessed legacy subject or use repo:*."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Pin inputs and preserve ownership",
+      "body": [
+        "The workflow installs a pinned uv release and runs uv sync --locked against the committed lockfile. Container builds use the same lock and a pinned uv image release. For production, review updates and pin third-party Actions and base images to immutable commit/digest references.",
+        "The workflow builds committed GitHub source and tags the image with github.sha. Rerunning a publish for a SHA that is already in an immutable ECR repository may be rejected; reuse the existing artifact or commit a new change instead of overwriting the release."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "A safe release and rollback are explicit",
+      "body": [
+        "Use the published SHA as image_tag, preserve all other Terraform inputs, and review a saved plan. Terraform creates new task-definition revisions and updates the services. Verify readiness and a complete job after the rollout.",
+        "Rollback means selecting a previously verified image SHA and reviewing another plan. An application rollback does not automatically reverse a database migration; design backward-compatible schemas and keep restore procedures separate."
+      ],
+      "bullets": []
+    }
+  ],
+  "handHoldingSteps": [
+    "Read GitHub’s current AWS OIDC reference and determine the exact production-environment subject for your repository. Add github_oidc_subject to the existing ignored release.auto.tfvars file without deleting its other settings.",
+    "Copy infra/07-oidc.tf into the existing module and plan/apply with your authenticated local operator identity. If your AWS account already has a GitHub OIDC provider, import/reference that existing provider instead of creating a duplicate URL.",
+    "Create repository/environment variables AWS_PUBLISH_ROLE_ARN from publisher_role_arn and ECR_URL from ecr_url. The publish job references the production environment; its trust subject must match that environment and your repository’s subject format.",
+    "Copy the workflow into .github/workflows/publish.yml, commit the backend and lockfile, then open a pull request. Confirm the quality job runs without AWS access.",
+    "Merge to main after review. Approve the protected publishing environment if configured. After publication, edit only image_tag in release.auto.tfvars, review a release plan locally, apply it, and verify a completed job."
+  ],
+  "concepts": [
+    "OIDC: A short-lived federated identity replaces a stored AWS access key, but trust-policy scoping still determines who gets access.",
+    "Least privilege: ECR publication and infrastructure administration are different permissions and identities.",
+    "Release ownership: This workflow publishes; Terraform owns service configuration and task-definition promotion."
+  ],
+  "commands": [
+    {
+      "command": "uv run --locked ruff check .\nuv run --locked ruff format --check .\nuv run --locked pytest\ngit add app tests Dockerfile compose.yaml pyproject.toml uv.lock .github/workflows/publish.yml\ngit diff --cached\ngit commit -m \"Add tested backend and publishing workflow\"\ngit push -u origin feature/backend-api",
+      "explanation": "Run exactly the quality checks CI will run, then open a pull request from your feature branch.",
+      "expected": "The pull request has a green quality job and no AWS publishing job."
+    },
+    {
+      "command": "terraform -chdir=infra plan -out=identity.tfplan\nterraform -chdir=infra apply identity.tfplan\nterraform -chdir=infra output -raw publisher_role_arn\nterraform -chdir=infra output -raw ecr_url",
+      "explanation": "Run after adding the exact OIDC subject input and identity file. Copy these non-secret outputs into GitHub variables.",
+      "expected": "A publisher role with ECR-only permissions."
+    },
+    {
+      "command": "# Edit only image_tag in release.auto.tfvars to the SHA published by CI.\nterraform -chdir=infra plan -out=release.tfplan\nterraform -chdir=infra show release.tfplan\nterraform -chdir=infra apply release.tfplan",
+      "explanation": "Preserve enable_services, worker_on_ec2 and github_oidc_subject. A code release may also include infrastructure changes; inspect the entire plan.",
+      "expected": "New task-definition revisions reference the approved SHA."
+    },
+    {
+      "command": "aws ecs wait services-stable --cluster bootcamp-iac-cluster --services bootcamp-iac-api bootcamp-iac-worker\nBASE_URL=$(terraform -chdir=infra output -raw alb_url)\ncurl --fail \"$BASE_URL/ready\"",
+      "explanation": "Use worker-ec2 if that is your selected mode, then repeat the enqueue/jobs verification from Chapter 8.",
+      "expected": "The rollout stabilizes and the application works end to end."
+    }
+  ],
+  "codeFiles": [
+    {
+      "filename": "infra/07-oidc.tf",
+      "code": "variable \"github_oidc_subject\" {\n  type        = string\n  description = \"Exact approved repository OIDC sub, including environment/immutable IDs as applicable\"\n}\nresource \"aws_iam_openid_connect_provider\" \"github\" {\n  url            = \"https://token.actions.githubusercontent.com\"\n  client_id_list = [\"sts.amazonaws.com\"]\n}\nresource \"aws_iam_role\" \"publisher\" {\n  name = \"${var.project_name}-publisher\"\n  assume_role_policy = jsonencode({\n    Version = \"2012-10-17\"\n    Statement = [{\n      Effect    = \"Allow\", Action = \"sts:AssumeRoleWithWebIdentity\",\n      Principal = { Federated = aws_iam_openid_connect_provider.github.arn },\n      Condition = {\n        StringEquals = {\n          \"token.actions.githubusercontent.com:aud\" = \"sts.amazonaws.com\"\n          \"token.actions.githubusercontent.com:sub\" = var.github_oidc_subject\n        }\n      }\n    }]\n  })\n}\nresource \"aws_iam_role_policy\" \"publisher\" {\n  role = aws_iam_role.publisher.id\n  policy = jsonencode({\n    Version = \"2012-10-17\"\n    Statement = [\n      { Effect = \"Allow\", Action = [\"ecr:GetAuthorizationToken\"], Resource = \"*\" },\n      {\n        Effect = \"Allow\"\n        Action = [\n          \"ecr:BatchCheckLayerAvailability\", \"ecr:InitiateLayerUpload\",\n          \"ecr:UploadLayerPart\", \"ecr:CompleteLayerUpload\", \"ecr:PutImage\"\n        ]\n        Resource = aws_ecr_repository.app.arn\n      }\n    ]\n  })\n}\noutput \"publisher_role_arn\" {\n  value = aws_iam_role.publisher.arn\n}\n",
+      "language": "hcl",
+      "description": "A tightly scoped identity for publishing images. Add to the existing module in this chapter.",
+      "walkthrough": [
+        {
+          "title": "github_oidc_subject",
+          "explanation": "A required exact subject input avoids silently trusting a wildcard repository. Determine the actual subject format from GitHub’s current guidance."
+        },
+        {
+          "title": "Federated trust",
+          "explanation": "sts:AssumeRoleWithWebIdentity is restricted to the GitHub provider, AWS audience and approved subject."
+        },
+        {
+          "title": "Publisher permissions",
+          "explanation": "GetAuthorizationToken requires Resource=*. Upload actions are scoped to one ECR ARN; this does not authorize infrastructure deployment."
+        }
+      ]
+    },
+    {
+      "filename": ".github/workflows/publish.yml",
+      "code": "name: Test and publish\non:\n  push:\n    branches: [main]\n  pull_request:\n\npermissions:\n  contents: read\n\njobs:\n  quality:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v5\n      - uses: astral-sh/setup-uv@v7\n        with:\n          version: \"0.13.6\"\n          enable-cache: true\n      - run: uv sync --locked --python 3.13\n      - run: uv run --locked ruff check .\n      - run: uv run --locked ruff format --check .\n      - run: uv run --locked pytest\n  publish:\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    needs: quality\n    runs-on: ubuntu-latest\n    environment: production\n    permissions:\n      contents: read\n      id-token: write\n    env:\n      AWS_REGION: us-east-1\n      ECR_URL: ${{ vars.ECR_URL }}\n      IMAGE_TAG: ${{ github.sha }}\n    steps:\n      - uses: actions/checkout@v5\n      - uses: aws-actions/configure-aws-credentials@v5\n        with:\n          role-to-assume: ${{ vars.AWS_PUBLISH_ROLE_ARN }}\n          aws-region: ${{ env.AWS_REGION }}\n      - name: Build and publish immutable image\n        shell: bash\n        run: |\n          set -euo pipefail\n          REGISTRY=\"${ECR_URL%%/*}\"\n          aws ecr get-login-password --region \"$AWS_REGION\" |\n            docker login --username AWS --password-stdin \"$REGISTRY\"\n          docker build --platform linux/amd64 -t \"$ECR_URL:$IMAGE_TAG\" .\n          docker push \"$ECR_URL:$IMAGE_TAG\"\n          echo \"Published $ECR_URL:$IMAGE_TAG\" >> \"$GITHUB_STEP_SUMMARY\"\n          echo \"Next: review a Terraform plan using image_tag=$IMAGE_TAG.\" >> \"$GITHUB_STEP_SUMMARY\"\n",
+      "language": "yaml",
+      "description": "Quality checks on pull requests; an environment-protected ECR publisher on main.",
+      "walkthrough": [
+        {
+          "title": "quality",
+          "explanation": "uv installs the locked Python environment. Ruff and pytest must pass before publication."
+        },
+        {
+          "title": "permissions",
+          "explanation": "The default is read-only source access; only the publish job can request an OIDC token."
+        },
+        {
+          "title": "Image and promotion",
+          "explanation": "Build from the repository root and tag github.sha. The summary hands off to a reviewed Terraform promotion, rather than assuming AdministratorAccess in CI."
+        }
+      ]
+    }
+  ],
+  "svgDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Architecture 9\" class=\"course-diagram\"><title>Architecture 9</title><defs><marker id=\"arrow-Architecture\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Pull request</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">No AWS credentials</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Quality job</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">uv + Ruff + pytest</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">GitHub OIDC</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Exact environment subject</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">ECR publisher</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Scoped upload only</text><rect x=\"300\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Terraform operator</text><text x=\"420\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Reviewed promotion</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M575,237 L540,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/></svg>",
+  "architectureDescription": "Pull requests run quality checks without AWS credentials. A protected main-branch job assumes a scoped ECR publisher identity; a separate Terraform operator reviews and promotes the resulting image.",
+  "flowDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Flow 9\" class=\"course-diagram\"><title>Flow 9</title><defs><marker id=\"arrow-Flow9\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Push feature branch</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Run checks</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Review + merge</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">main only</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Approve environment</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">If protected</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Assume publisher role</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Short-lived OIDC</text><rect x=\"300\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Build + publish</text><text x=\"420\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Immutable image SHA</text><rect x=\"25\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Review + deploy</text><text x=\"145\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Terraform plan/apply</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow9)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow9)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow9)\"/><path d=\"M575,237 L540,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow9)\"/><path d=\"M300,237 L265,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow9)\"/></svg>",
+  "flowDescription": "Push feature branch → Review + merge → Approve environment → Assume publisher role → Build + publish → Review + deploy.",
+  "breakItDrill": {
+    "title": "Reject the wrong subject",
+    "scenario": "Configure a deliberately incorrect github_oidc_subject in the isolated lab and attempt publication.",
+    "symptom": "The AWS role assumption fails before image upload; widening ECR permissions would not fix the trust failure.",
+    "fix": "Restore the exact approved subject and verify environment/repository identity. Never fix it by changing the subject to a broad wildcard."
+  },
+  "assignment": {
+    "title": "Write a release record",
+    "description": "Record the source SHA, image digest, reviewed plan, migration compatibility assessment, verification job ID, and known-good rollback SHA. Explain which identity performs each step.",
+    "completionHint": "Verify the result yourself, then complete the chapter checklist."
+  },
+  "recallNote": {
+    "keyTakeaway": "An authenticated pipeline still needs narrowly scoped trust and permissions; publishing and deploying are different actions.",
+    "bullets": [
+      "No static AWS keys in GitHub secrets.",
+      "Exact subject and audience belong in the role trust policy.",
+      "The publisher role cannot deploy infrastructure.",
+      "Preserve release inputs across plan/apply and rollback."
+    ]
+  },
+  "badgeTone": "indigo",
+  "sources": [
+    {
+      "label": "GitHub OIDC for AWS, including immutable subjects",
+      "url": "https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws"
+    },
+    {
+      "label": "setup-uv action",
+      "url": "https://github.com/astral-sh/setup-uv"
+    },
+    {
+      "label": "AWS credential action",
+      "url": "https://github.com/aws-actions/configure-aws-credentials"
+    }
+  ],
+  "checklist": [
+    {
+      "id": "w8-c1",
+      "text": "Run locked dependency installation, linting, formatting and tests in CI."
+    },
+    {
+      "id": "w8-c2",
+      "text": "Explain OIDC trust, audience and subject without long-lived AWS keys."
+    },
+    {
+      "id": "w8-c3",
+      "text": "Publish a SHA-tagged image with narrowly scoped ECR permissions."
+    },
+    {
+      "id": "w8-c4",
+      "text": "Use a reviewed Terraform plan for promotion and rollback."
+    }
+  ]
+}

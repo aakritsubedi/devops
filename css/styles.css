@@ -1,0 +1,118 @@
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(161, 161, 170, 0.25); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(161, 161, 170, 0.45); }
+pre { tab-size: 2; }
+.bg-dot-grid {
+  background-image: radial-gradient(rgba(161, 161, 170, 0.18) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+input[type="range"] { -webkit-appearance: none; appearance: none; background: transparent; }
+input[type="range"]::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: rgba(161, 161, 170, 0.25); }
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; height: 14px; width: 14px; border-radius: 50%; background: currentColor; margin-top: -5px; cursor: pointer; }
+
+:root {
+  --reader-ink: #27272a;
+  --reader-muted: #71717a;
+  --reader-line: #e4e4e7;
+  --reader-surface: #fff;
+  --reader-soft: #f4f4f5;
+  --reader-accent: #047857;
+  --editor-bg: #fafafa;
+  --editor-bar: #f1f1f3;
+  --token-keyword: #7c3aed;
+  --token-string: #047857;
+  --token-number: #b45309;
+  --token-function: #1d4ed8;
+  --token-comment: #737373;
+}
+html.dark {
+  --reader-ink: #e4e4e7;
+  --reader-muted: #a1a1aa;
+  --reader-line: #29292e;
+  --reader-surface: #101013;
+  --reader-soft: #19191f;
+  --reader-accent: #6ee7b7;
+  --editor-bg: #111116;
+  --editor-bar: #1a1a21;
+  --token-keyword: #c4b5fd;
+  --token-string: #86efac;
+  --token-number: #fbbf24;
+  --token-function: #93c5fd;
+  --token-comment: #8b8b9c;
+}
+.course-article { color: var(--reader-ink); }
+#course-duration { white-space: nowrap; font-size: 9px; }
+#course-name { white-space: nowrap; font-size: 13px; }
+#course-tagline { display: block; white-space: nowrap; }
+.course-prose { font-size: 15px; line-height: 1.85; color: var(--reader-muted); }
+.course-section-heading { font: 600 12px/1.6 Inter, sans-serif; letter-spacing: .08em; text-transform: uppercase; color: var(--reader-muted); margin-bottom: 1.25rem; }
+.inline-code { font: .88em/1.6 'JetBrains Mono', monospace; padding: .12em .35em; border-radius: 4px; background: var(--reader-soft); color: var(--reader-ink); overflow-wrap: anywhere; }
+.learning-overview { border-left: 2px solid var(--reader-accent); padding: .25rem 0 .25rem 1.5rem; }
+.learning-overview h2, .learning-overview h3 { font-weight: 600; font-size: 14px; margin-bottom: .7rem; }
+.learning-overview ul { list-style: disc; padding-left: 1.2rem; font-size: 14px; line-height: 1.9; color: var(--reader-muted); }
+.prerequisites { margin-top: 1.5rem; }
+.prerequisites h3 { color: var(--reader-muted); font-size: 12px; }
+.fundamental-lesson { padding: 1.75rem 0; border-bottom: 1px solid var(--reader-line); }
+.fundamental-lesson:last-child { border-bottom: 0; padding-bottom: 0; }
+.fundamental-lesson h3, .file-section-title { font-size: 18px; font-weight: 600; line-height: 1.6; margin-bottom: .8rem; }
+.fundamental-lesson p + p { margin-top: .9rem; }
+.section-number { color: var(--reader-accent); font: 500 11px/1.6 'JetBrains Mono', monospace; margin-right: .85rem; }
+.file-section-title { font-family: 'JetBrains Mono', monospace; font-size: 14px; overflow-wrap: anywhere; }
+.file-description { margin-bottom: 1rem; }
+.command-reference > ol > li + li { margin-top: 2rem; }
+.command-heading { font-size: 14px; line-height: 1.8; margin-bottom: .9rem; color: var(--reader-muted); }
+.expected-result { display: flex; flex-direction: column; gap: .3rem; font-size: 13px; line-height: 1.8; color: var(--reader-muted); margin-top: .8rem; padding-left: 1rem; border-left: 2px solid var(--reader-line); }
+.expected-result strong { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--reader-accent); }
+.code-editor { border: 1px solid var(--reader-line); border-radius: 10px; overflow: hidden; background: var(--editor-bg); }
+.editor-titlebar { display: flex; align-items: center; gap: 14px; min-height: 46px; padding: 8px 14px; background: var(--editor-bar); border-bottom: 1px solid var(--reader-line); }
+.editor-lights { display: flex; gap: 5px; flex-shrink: 0; }
+.editor-lights i { width: 7px; height: 7px; border-radius: 50%; background: #f87171; }
+.editor-lights i:nth-child(2) { background: #fbbf24; }
+.editor-lights i:nth-child(3) { background: #4ade80; }
+.editor-filename { font: 11px/1.6 'JetBrains Mono', monospace; color: var(--reader-muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.editor-actions button { font-size: 11px; color: var(--reader-muted); padding: 4px 7px; border: 1px solid transparent; border-radius: 4px; }
+.editor-actions button:hover, .editor-actions button:focus-visible { color: var(--reader-ink); border-color: var(--reader-line); }
+.editor-scroll { overflow: auto; max-height: 34rem; scrollbar-gutter: stable; }
+.editor-source { display: grid; grid-template-columns: 3.5rem 1fr; min-width: max-content; }
+.editor-gutter { position: sticky; left: 0; z-index: 1; padding: 18px 12px; border-right: 1px solid var(--reader-line); background: var(--editor-bg); user-select: none; color: var(--token-comment); text-align: right; }
+.editor-gutter span { display: block; }
+.editor-code, .editor-gutter { font: 12px/22px 'JetBrains Mono', monospace; }
+.editor-code { margin: 0; padding: 18px 20px; background: transparent; color: var(--reader-ink); white-space: pre; min-width: max-content; }
+.editor-code code { font: inherit; text-shadow: none; background: none; }
+.editor-status { display: flex; justify-content: space-between; gap: 16px; padding: 6px 14px; border-top: 1px solid var(--reader-line); background: var(--editor-bar); color: var(--reader-muted); font: 9px/1.6 'JetBrains Mono', monospace; }
+.code-walkthrough { padding: 1.2rem 0 0 1.25rem; border-left: 1px solid var(--reader-line); margin: 1.25rem 0 0 .4rem; }
+.code-walkthrough h4 { font-size: 12px; font-weight: 600; margin-bottom: 1rem; color: var(--reader-accent); }
+.code-walkthrough li + li { margin-top: 1rem; }
+.code-walkthrough strong { font: 500 12px/1.7 'JetBrains Mono', monospace; overflow-wrap: anywhere; }
+.code-walkthrough p { font-size: 13px; line-height: 1.85; color: var(--reader-muted); margin-top: .3rem; }
+.token.comment, .token.prolog, .token.doctype { color: var(--token-comment); font-style: italic; }
+.token.keyword, .token.atrule, .token.selector { color: var(--token-keyword); }
+.token.string, .token.attr-value { color: var(--token-string); }
+.token.number, .token.boolean, .token.constant { color: var(--token-number); }
+.token.function, .token.class-name, .token.builtin { color: var(--token-function); }
+.token.property, .token.variable, .token.attr-name { color: var(--token-keyword); }
+.token.operator, .token.punctuation { color: var(--reader-muted); }
+.diagram-panel, .bg-dot-grid { overflow-x: auto; }
+.diagram-panel { border: 1px solid var(--reader-line); border-radius: 10px; background: var(--reader-surface); padding: 16px; }
+.course-diagram { width: 100%; min-width: 640px; height: auto; color: var(--reader-muted); }
+.diagram-node { fill: var(--reader-surface); stroke: var(--reader-line); stroke-width: 1.5; }
+.diagram-title { fill: var(--reader-ink); font: 600 14px Inter, sans-serif; }
+.diagram-detail { fill: var(--reader-muted); font: 11px 'JetBrains Mono', monospace; }
+.diagram-arrow { fill: none; stroke: currentColor; stroke-width: 1.3; }
+.diagram-boundary { fill: var(--reader-soft); stroke: var(--reader-line); stroke-dasharray: 5 5; }
+.diagram-group { fill: var(--reader-muted); font: 10px 'JetBrains Mono', monospace; letter-spacing: .5px; }
+.diagram-edge-label { fill: var(--reader-muted); font: 10px Inter, sans-serif; }
+.diagram-caption { font-size: 13px; }
+.course-sources { padding-top: 1.5rem; border-top: 1px solid var(--reader-line); }
+.course-sources ul { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; }
+.course-sources a { color: var(--reader-muted); font-size: 12px; text-decoration: underline; text-underline-offset: 4px; }
+.course-sources a:hover { color: var(--reader-accent); }
+@media (max-width: 900px) {
+  body > aside { width: 15rem; }
+  #lesson-container { padding: 2rem 1.25rem; }
+  main > header { padding-left: 1.25rem; padding-right: 1.25rem; }
+  #header-mode-badge { display: none; }
+  .editor-lights { display: none; }
+}

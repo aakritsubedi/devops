@@ -1,0 +1,268 @@
+{
+  "week": 1,
+  "mode": "Git · uv · Python 3.13",
+  "title": "Start Here: Terminal, Git, Python & uv",
+  "subtitle": "Create the repository, understand the project files, and learn the commands you will use throughout the course.",
+  "phase": "Foundations",
+  "analogy": "A repository is the workshop. Git records the plans, pyproject.toml lists the materials, uv.lock records the exact materials chosen, and .venv is your isolated workbench.",
+  "objectives": [
+    "Create and navigate a Git repository from the terminal.",
+    "Use uv to select Python, manage dependencies, and run project tools.",
+    "Explain what belongs in Git and what stays on your machine.",
+    "Prepare the package structure used by every later chapter."
+  ],
+  "prerequisites": [
+    "A terminal and code editor. Commands use Bash/zsh on macOS or Linux; Windows learners should use WSL2 with Docker’s WSL integration.",
+    "Install Git, Docker Engine with Compose v2 (or Docker Desktop), uv, and curl. Install AWS CLI v2 and Terraform 1.11+ before the cloud chapters; links below cover platform-specific installation."
+  ],
+  "lessons": [
+    {
+      "title": "The tools and the baseline",
+      "body": [
+        "This course uses Python 3.13 as a supported learning baseline, not as a claim about the newest Python release. The app uses FastAPI with Pydantic 2, async Psycopg 3, TaskIQ Streams, PostgreSQL 17, and Redis-compatible Valkey in AWS. Ruff handles linting/formatting, pytest checks behavior, and uv manages Python plus dependencies.",
+        "Use a dedicated learning AWS account for cloud exercises. NAT gateways, ALBs, databases and running containers incur charges. Local chapters need no AWS account."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Understand paths before copying commands",
+      "body": [
+        "`pwd` prints the working directory. `cd` changes it; `..` means its parent. A relative path like `app/main.py` is interpreted from your current directory. Run project commands from the repository root unless a command explicitly uses `terraform -chdir=infra`.",
+        "The repository you create is the backend project, separate from the course reader. Do not put a second application inside this website repository."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Why uv replaces the manual pip workflow",
+      "body": [
+        "`uv add` changes project dependencies and resolves a lockfile. `uv sync` creates or updates `.venv`; `uv run` runs a command with that environment. You do not need to activate the environment or install dependencies into system Python.",
+        "Commit `pyproject.toml`, `uv.lock` and `.python-version`. A teammate runs `uv sync --locked` to reproduce the resolution. `--locked` fails on a stale lock; `--frozen` skips that freshness check. They are not interchangeable."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "A minimal Python mental model",
+      "body": [
+        "A module is a `.py` file; a package is a directory such as `app/` with `__init__.py`. `from app.config import Settings` imports a name. A function accepts inputs and returns a result. Type hints describe expected values; they do not by themselves validate HTTP input.",
+        "Pydantic validates request data in the API. A dictionary maps keys to values, a list holds ordered items, and an exception reports a failed operation. Read indentation as program structure; use four spaces.",
+        "Try the standalone python_basics.py example below: it demonstrates a type alias, a function, a dictionary, a for loop, a list comprehension, an if condition and try/except before those ideas appear inside the web application."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "A repeatable daily loop",
+      "body": [
+        "Create a branch, edit one behavior, run formatting/lint/tests, inspect `git diff`, then commit. The course will show complete file contents followed by explanations. A green unit test does not prove a database migration or cloud deployment works; later chapters add those checks."
+      ],
+      "bullets": []
+    }
+  ],
+  "handHoldingSteps": [
+    "Install the prerequisites and verify their versions. If uv is missing, use its official installer or your package manager; restart the terminal so uv is on PATH.",
+    "Create `backend-bootcamp`, initialize Git, and initialize a bare uv project. Replace the generated pyproject.toml with the file shown below before resolving dependencies.",
+    "Create `app/`, `tests/`, `infra/` and `.github/workflows/`. Copy the ignore files and environment example. Create a short README explaining how to run the project.",
+    "Run `uv lock` and `uv sync --locked`. The first command resolves actual dependency versions; never hand-author uv.lock. Create application files in Chapter 2 before running its tests.",
+    "Inspect `git status` and `git diff --cached` before committing. `.env`, state and virtual environments must stay untracked. Create an empty remote repository in your Git hosting UI if you want to push."
+  ],
+  "concepts": [
+    "Source vs environment: Python code and dependency declarations are shared; the installed `.venv` is machine-specific and recreated.",
+    "Lockfile vs manifest: pyproject.toml declares allowed versions; uv.lock stores the resolved graph. Review both when changing dependencies.",
+    "Environment variables: Local .env values are development examples. AWS injects production settings and database credentials at task startup."
+  ],
+  "commands": [
+    {
+      "command": "# Optional, if uv is not installed on macOS/Linux:\ncurl -LsSf https://astral.sh/uv/install.sh | sh\n# Restart the terminal, then verify:\nuv --version",
+      "explanation": "Install uv using the official Astral installer, or follow the package-manager/platform alternatives linked below. The installer adds uv to your user tool directory.",
+      "expected": "uv is available on PATH; no global pip installation is needed."
+    },
+    {
+      "command": "git --version\nuv --version\ndocker --version\ndocker compose version\ncurl --version",
+      "explanation": "Verify prerequisites before debugging application code. Install missing tools from the official links.",
+      "expected": "Each command prints a version; Compose must be v2."
+    },
+    {
+      "command": "mkdir backend-bootcamp\ncd backend-bootcamp\ngit init -b main\nuv init --bare --python 3.13\nuv python install 3.13\nuv python pin 3.13\nmkdir -p app tests infra .github/workflows\ntouch app/__init__.py README.md",
+      "explanation": "Initialize the project. --bare skips a sample hello-world application; the app package will hold our API and worker.",
+      "expected": "A .git directory, pyproject.toml, .python-version, and the package folders exist."
+    },
+    {
+      "command": "pwd\nls -la\ncd app\ncd ..",
+      "explanation": "Practice inspecting folders without changing code.",
+      "expected": "You end in the repository root."
+    },
+    {
+      "command": "printf 'practice file\\n' > notes.txt\ncat notes.txt\ncp notes.txt notes.backup.txt\nmv notes.backup.txt notes.archive.txt\nrm notes.archive.txt",
+      "explanation": "Practice creating, reading, copying, renaming and deleting one disposable file. rm has no undo; here it targets only the named practice copy.",
+      "expected": "notes.txt remains; the temporary archived copy is removed."
+    },
+    {
+      "command": "uv lock\nuv sync --locked\nuv run python --version\nuv tree",
+      "explanation": "After copying pyproject.toml, resolve dependencies, install the locked environment and inspect the dependency tree.",
+      "expected": "uv.lock and .venv exist; Python reports 3.13.x."
+    },
+    {
+      "command": "cp .env.example .env\ngit status --short\ngit check-ignore .env .venv/",
+      "explanation": "Create local settings and verify they are ignored. This .env is for processes running on your host; Compose supplies its own container settings.",
+      "expected": "Git reports .env and .venv/ as ignored."
+    },
+    {
+      "command": "git add .gitignore .dockerignore .python-version .env.example pyproject.toml uv.lock app/__init__.py README.md\ngit diff --cached\ngit commit -m \"Initialize uv backend project\"",
+      "explanation": "Review and save the initial project, without committing credentials. Configure git user.name and user.email first if Git asks.",
+      "expected": "The first commit contains source/configuration only."
+    },
+    {
+      "command": "git switch -c feature/backend-api\ngit diff\ngit log --oneline -5",
+      "explanation": "Use a feature branch for Chapter 2 and learn how to inspect changes/history.",
+      "expected": "You are on feature/backend-api."
+    },
+    {
+      "command": "git remote add origin https://github.com/YOUR_OWNER/backend-bootcamp.git\ngit push -u origin main",
+      "explanation": "Optional: replace YOUR_OWNER and create the empty remote first. Authenticate with your Git host’s supported flow.",
+      "expected": "The main branch is published to your own repository."
+    },
+    {
+      "command": "uv add --dev pytest-cov\nuv tree\nuv remove --dev pytest-cov\ngit diff -- pyproject.toml uv.lock",
+      "explanation": "Optional dependency exercise: add a development-only test plugin, inspect the dependency graph, remove it, then review the manifest/lockfile changes. Use uv lock --upgrade-package PACKAGE for a deliberate package update, followed by tests.",
+      "expected": "The plugin is absent again; any remaining resolution changes are visible for review."
+    }
+  ],
+  "codeFiles": [
+    {
+      "filename": "examples/python_basics.py",
+      "language": "python",
+      "code": "\"\"\"Save as examples/python_basics.py; run with uv run python examples/python_basics.py.\"\"\"\n\ntype WordCounts = dict[str, int]\n\n\ndef count_words(text: str) -> WordCounts:\n    if not text.strip():\n        raise ValueError(\"Text must contain at least one word\")\n    counts: WordCounts = {}\n    for word in text.casefold().split():\n        counts[word] = counts.get(word, 0) + 1\n    return counts\n\n\nif __name__ == \"__main__\":\n    result = count_words(\"Hello uv hello\")\n    print(result)\n    repeated = [word for word, count in result.items() if count > 1]\n    print(repeated)\n    try:\n        count_words(\"\")\n    except ValueError as error:\n        print(f\"Invalid input: {error}\")\n",
+      "description": "A small executable exercise before the framework code. Create examples/ first, then save and run this file with uv run --locked python examples/python_basics.py. It prints word counts, repeated words, and a handled validation error.",
+      "walkthrough": [
+        {
+          "title": "Types and functions",
+          "explanation": "WordCounts names a dictionary type. The function accepts a string and returns a mapping. Type hints guide readers/tools; the explicit if/raise performs validation."
+        },
+        {
+          "title": "Loop and dictionary",
+          "explanation": "casefold normalizes text, split produces a list, and the for loop updates dictionary counts. Indentation groups statements inside the loop."
+        },
+        {
+          "title": "Comprehension and exceptions",
+          "explanation": "The list comprehension selects repeated words. try/except handles the expected ValueError from empty input without hiding unrelated failures."
+        },
+        {
+          "title": "Module entry point",
+          "explanation": "The __name__ guard runs the exercise only when executing this file directly, not when another module imports count_words."
+        }
+      ]
+    },
+    {
+      "filename": "pyproject.toml",
+      "code": "[project]\nname = \"backend-bootcamp\"\nversion = \"0.1.0\"\nrequires-python = \">=3.13,<3.14\"\ndependencies = [\n  \"fastapi>=0.115,<1\",\n  \"uvicorn[standard]>=0.34,<1\",\n  \"pydantic-settings>=2.7,<3\",\n  \"psycopg[binary,pool]>=3.2,<4\",\n  \"taskiq>=0.11,<1\",\n  \"taskiq-redis>=1.0,<2\",\n]\n\n[dependency-groups]\ndev = [\"ruff>=0.11,<1\", \"pytest>=8,<10\", \"httpx>=0.28,<1\"]\n\n[tool.ruff]\ntarget-version = \"py313\"\nline-length = 88\n\n[tool.ruff.lint]\nselect = [\"E\", \"F\", \"I\", \"UP\", \"B\", \"ASYNC\"]\n\n[tool.pytest.ini_options]\npythonpath = [\".\"]\ntestpaths = [\"tests\"]\n",
+      "language": "toml",
+      "description": "The project manifest. Copy this before running uv lock.",
+      "walkthrough": [
+        {
+          "title": "[project]",
+          "explanation": "The Python range selects the 3.13 baseline; runtime dependencies are installed in containers."
+        },
+        {
+          "title": "[dependency-groups]",
+          "explanation": "The dev group installs Ruff, pytest and HTTPX for local checks and CI. uv sync installs it by default; container builds use --no-dev."
+        },
+        {
+          "title": "[tool.ruff] and [tool.pytest]",
+          "explanation": "Tools read their configuration here, so teammates and CI run the same checks."
+        }
+      ]
+    },
+    {
+      "filename": ".gitignore",
+      "code": ".venv/\n__pycache__/\n*.py[cod]\n.pytest_cache/\n.ruff_cache/\n.env\n.env.*\n!.env.example\ninfra/.terraform/\n*.tfstate\n*.tfstate.*\n*.tfplan\n*.tfvars\n!*.tfvars.example\ncrash.log\n# Commit uv.lock and infra/.terraform.lock.hcl.\n",
+      "language": "plaintext",
+      "description": "Protect local environments, secret files, state, and plan files from accidental commits.",
+      "walkthrough": []
+    },
+    {
+      "filename": ".dockerignore",
+      "code": ".git\n.venv\n.env\n.env.*\n__pycache__\n.pytest_cache\n.ruff_cache\ninfra\nnode_modules\n",
+      "language": "plaintext",
+      "description": "Keep credentials, Git history, and host virtual environments out of the build context.",
+      "walkthrough": []
+    },
+    {
+      "filename": ".env.example",
+      "code": "# Only for a host process using Compose's published data ports.\nREDIS_URL=redis://localhost:6379/0\nDB_HOST=localhost\nDB_PORT=5432\nDB_NAME=appdb\nDB_USER=appuser\nDB_PASSWORD=local-dev-only\nDB_SSLMODE=disable\n",
+      "language": "plaintext",
+      "description": "These non-secret sample values describe host-side local connections. Copy to .env and never reuse this password in AWS.",
+      "walkthrough": []
+    }
+  ],
+  "svgDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 230\" role=\"img\" aria-label=\"Architecture 1\" class=\"course-diagram\"><title>Architecture 1</title><defs><marker id=\"arrow-Architecture\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Repository</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Source + configuration</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">uv.lock</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Resolved dependency graph</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">.venv</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Isolated Python environment</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/></svg>",
+  "architectureDescription": "Git preserves the source and manifests. uv reads the lockfile to reproduce a machine-local environment; the virtual environment is not stored in Git.",
+  "flowDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Flow 1\" class=\"course-diagram\"><title>Flow 1</title><defs><marker id=\"arrow-Flow1\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Edit manifest</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">pyproject.toml</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Resolve</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">uv lock</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Install</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">uv sync --locked</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Run tools</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">uv run …</text><rect x=\"300\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Review</text><text x=\"420\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">git diff</text><rect x=\"25\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Commit</text><text x=\"145\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">source + lockfile</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow1)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow1)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow1)\"/><path d=\"M575,237 L540,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow1)\"/><path d=\"M300,237 L265,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow1)\"/></svg>",
+  "flowDescription": "Edit manifest → Resolve → Install → Run tools → Review → Commit.",
+  "breakItDrill": {
+    "title": "Detect a stale lockfile",
+    "scenario": "Change a dependency constraint in pyproject.toml, then run `uv sync --locked`.",
+    "symptom": "uv refuses to silently change the dependency resolution.",
+    "fix": "Run `uv lock`, review its diff, then sync again. Do not delete the lockfile just to silence the failure."
+  },
+  "assignment": {
+    "title": "Document your setup",
+    "description": "Write a README with installation prerequisites, repository structure, the Python baseline, and why uv.lock is committed. Create a feature branch for the next chapter.",
+    "completionHint": "Verify the result yourself, then complete the chapter checklist."
+  },
+  "recallNote": {
+    "keyTakeaway": "A reproducible project starts with explicit dependencies and a committed lockfile.",
+    "bullets": [
+      "Use `uv run` instead of installing tools globally.",
+      "Use Bash/zsh or WSL consistently throughout the lab.",
+      "Git tracks source and lockfiles, never .env or Terraform state."
+    ]
+  },
+  "badgeTone": "amber",
+  "sources": [
+    {
+      "label": "uv project workflow",
+      "url": "https://docs.astral.sh/uv/guides/projects/"
+    },
+    {
+      "label": "uv installation by platform",
+      "url": "https://docs.astral.sh/uv/getting-started/installation/"
+    },
+    {
+      "label": "Locking and syncing",
+      "url": "https://docs.astral.sh/uv/concepts/projects/sync/"
+    },
+    {
+      "label": "Git basics",
+      "url": "https://git-scm.com/book/en/v2/Git-Basics-Getting-a-Git-Repository"
+    },
+    {
+      "label": "Docker installation",
+      "url": "https://docs.docker.com/engine/install/"
+    },
+    {
+      "label": "AWS CLI v2 installation",
+      "url": "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+    },
+    {
+      "label": "Terraform installation",
+      "url": "https://developer.hashicorp.com/terraform/install"
+    }
+  ],
+  "checklist": [
+    {
+      "id": "setup-1",
+      "text": "Create and navigate a Git repository from the terminal."
+    },
+    {
+      "id": "setup-2",
+      "text": "Use uv to select Python, manage dependencies, and run project tools."
+    },
+    {
+      "id": "setup-3",
+      "text": "Explain what belongs in Git and what stays on your machine."
+    },
+    {
+      "id": "setup-4",
+      "text": "Prepare the package structure used by every later chapter."
+    }
+  ]
+}

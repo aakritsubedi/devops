@@ -1,0 +1,142 @@
+{
+  "week": 3,
+  "mode": "VPC · DNS · Routing",
+  "title": "Networking Fundamentals: How a Request Reaches Your App",
+  "subtitle": "Understand IP addresses, subnets, routes, DNS, ports and security groups before deploying a container.",
+  "phase": "Build & Operate",
+  "analogy": "A subnet is a neighborhood, a route table is its road map, and a security group is a door policy. A road to a building does not mean its door is open.",
+  "objectives": [
+    "Explain CIDR ranges, ports, routing and stateful firewalls.",
+    "Build public and private subnets across two Availability Zones.",
+    "Trace inbound HTTP separately from outbound internet access.",
+    "Diagnose routing and security-group failures independently."
+  ],
+  "prerequisites": [
+    "Complete the local backend chapter.",
+    "AWS CLI v2 authenticated to a learning account; choose us-east-1 for consistency with examples."
+  ],
+  "lessons": [
+    {
+      "title": "IP addresses, CIDR and ports",
+      "body": [
+        "`10.42.0.0/16` is a private IPv4 range. A `/24` subnet holds a smaller part of it; subnets in one VPC cannot overlap. Ports select listening processes: our API listens on 8000, PostgreSQL on 5432, and Redis-compatible services on 6379.",
+        "A URL first resolves through DNS. TCP must reach the destination port before HTTP can work. A timeout usually points to reachability; a connection refusal often means no listener; an HTTP 5xx means some HTTP server answered."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "What makes a subnet public?",
+      "body": [
+        "A public subnet has a route to an internet gateway. A private subnet does not. A private IPv4 workload can use a NAT gateway for outbound internet access. Put the NAT gateway in a public subnet with an Elastic IP, and point the private default route to it.",
+        "A public subnet alone does not give an EC2 instance a public IP. Private tasks can still receive ALB traffic because both endpoints have private VPC connectivity. NAT is not on the ALB-to-task request path."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Security groups and routes solve different problems",
+      "body": [
+        "Routes select a next hop. Security groups permit traffic to an attached network interface; their rules are stateful, so response traffic to allowed connections is permitted. Network ACLs operate at the subnet boundary and are stateless.",
+        "Allow public HTTP only to the lab ALB; allow API port 8000 only from the ALB security group; allow data ports only from the app security group. A source security group is a reference to interfaces with that group, not a blanket IP range."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Availability and cost",
+      "body": [
+        "Use two public subnets for the ALB and a multi-AZ database subnet group. The Terraform lab uses one NAT gateway to reduce the number of billed gateways; this creates an AZ dependency and may cause cross-AZ data charges.",
+        "A production design may use NAT per AZ and VPC endpoints. Two subnets alone do not make a single database or cache node highly available."
+      ],
+      "bullets": []
+    }
+  ],
+  "handHoldingSteps": [
+    "Authenticate with AWS IAM Identity Center using aws configure sso / aws sso login, then confirm account identity before creating anything.",
+    "For the optional manual path, create a separate VPC named bootcamp-manual with 10.42.0.0/16. Add public 10.42.0.0/24 and 10.42.1.0/24 plus private 10.42.10.0/24 and 10.42.11.0/24 in two AZs.",
+    "Attach an internet gateway. Create a public route table with 0.0.0.0/0 to that gateway. Allocate an Elastic IP and create a NAT gateway in the first public subnet.",
+    "Create a private route table with 0.0.0.0/0 to NAT and explicitly associate both private subnets. Keep database and app interfaces private.",
+    "Create alb-sg, app-sg and data-sg using the rules described above. Record IDs rather than relying on names, which may exist in multiple VPCs. The Terraform chapter creates a fresh stack; it does not automatically adopt this manual one."
+  ],
+  "concepts": [
+    "Routing: The default route applies only when a more specific route does not match.",
+    "Stateful security groups: Return traffic for an allowed connection does not require a reverse ingress rule.",
+    "Private does not mean offline: NAT and service endpoints can provide outbound access without public workload IPs."
+  ],
+  "commands": [
+    {
+      "command": "aws configure sso\naws sso login --profile bootcamp\nexport AWS_PROFILE=bootcamp\nexport AWS_REGION=us-east-1\naws sts get-caller-identity",
+      "explanation": "Configure a named SSO profile and verify the target account. Use your organization’s start URL and permission set.",
+      "expected": "The account ID and assumed-role ARN belong to the intended learning account."
+    },
+    {
+      "command": "aws ec2 describe-vpcs --query 'Vpcs[*].[VpcId,CidrBlock]' --output json\naws ec2 describe-subnets --filters Name=vpc-id,Values=VPC_ID --output json",
+      "explanation": "Replace VPC_ID with your VPC ID. Read-only discovery helps verify subnet placement.",
+      "expected": "Four intended subnet CIDRs in the chosen VPC."
+    },
+    {
+      "command": "aws ec2 describe-route-tables --filters Name=vpc-id,Values=VPC_ID --output json\naws ec2 describe-security-groups --filters Name=vpc-id,Values=VPC_ID --output json",
+      "explanation": "Inspect actual route associations and group rules rather than guessing from names.",
+      "expected": "Public default routes use IGW; private default routes use NAT."
+    }
+  ],
+  "codeFiles": [
+    {
+      "filename": "network-permissions.txt",
+      "code": "Internet -> ALB : TCP 80 (lab only; HTTPS for real users)\nALB security group -> app security group : TCP 8000\nApp security group -> data security group : TCP 5432 and 6379\nPrivate task -> NAT -> Internet : outbound image/API access\nNo direct Internet -> database or cache path\n",
+      "description": "A readable network checklist, not an executable shell script.",
+      "language": "plaintext",
+      "walkthrough": []
+    }
+  ],
+  "svgDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 510\" role=\"img\" aria-label=\"Inbound traffic and private outbound internet access\" class=\"course-diagram\"><title>Inbound traffic and private outbound internet access</title><defs><marker id=\"graph-arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"335\" y=\"180\" width=\"610\" height=\"170\" rx=\"14\" class=\"diagram-boundary\"/><text x=\"351\" y=\"205\" class=\"diagram-group\">PRIVATE SUBNETS · no direct internet gateway route</text><path d=\"M220,68 L360,68\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"290\" y=\"50\" class=\"diagram-edge-label\" text-anchor=\"middle\">Inbound request</text><path d=\"M475,106 L475,230\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"570\" y=\"180\" class=\"diagram-edge-label\" text-anchor=\"middle\">ALB → private target</text><path d=\"M590,268 L680,268\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"635\" y=\"250\" class=\"diagram-edge-label\" text-anchor=\"middle\">Database</text><path d=\"M360,268 L250,268\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"307\" y=\"248\" class=\"diagram-edge-label\" text-anchor=\"middle\">Outbound default route</text><path d=\"M135,306 L135,410\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"205\" y=\"365\" class=\"diagram-edge-label\" text-anchor=\"middle\">NAT → IGW</text><rect x=\"20\" y=\"30\" width=\"200\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"120.0\" y=\"61\" text-anchor=\"middle\" class=\"diagram-title\">Internet client</text><text x=\"120.0\" y=\"83\" text-anchor=\"middle\" class=\"diagram-detail\">Public DNS + TCP</text><rect x=\"360\" y=\"30\" width=\"230\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"475.0\" y=\"61\" text-anchor=\"middle\" class=\"diagram-title\">Public ALB</text><text x=\"475.0\" y=\"83\" text-anchor=\"middle\" class=\"diagram-detail\">HTTP :80</text><rect x=\"360\" y=\"230\" width=\"230\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"475.0\" y=\"261\" text-anchor=\"middle\" class=\"diagram-title\">Private API</text><text x=\"475.0\" y=\"283\" text-anchor=\"middle\" class=\"diagram-detail\">TCP :8000 from ALB only</text><rect x=\"680\" y=\"230\" width=\"250\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"805.0\" y=\"261\" text-anchor=\"middle\" class=\"diagram-title\">Private PostgreSQL</text><text x=\"805.0\" y=\"283\" text-anchor=\"middle\" class=\"diagram-detail\">TCP :5432 from app only</text><rect x=\"20\" y=\"230\" width=\"230\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"135.0\" y=\"261\" text-anchor=\"middle\" class=\"diagram-title\">Public NAT gateway</text><text x=\"135.0\" y=\"283\" text-anchor=\"middle\" class=\"diagram-detail\">Elastic IP + IGW route</text><rect x=\"20\" y=\"410\" width=\"230\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"135.0\" y=\"441\" text-anchor=\"middle\" class=\"diagram-title\">Internet services</text><text x=\"135.0\" y=\"463\" text-anchor=\"middle\" class=\"diagram-detail\">Outbound APIs / registries</text></svg>",
+  "architectureDescription": "Inbound traffic follows internet → public ALB → private API → private data. Private tasks use a separate outbound route through NAT; databases do not receive public inbound traffic.",
+  "flowDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Flow 3\" class=\"course-diagram\"><title>Flow 3</title><defs><marker id=\"arrow-Flow3\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Resolve ALB DNS</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Public endpoint</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">TCP to ALB :80</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Ingress rule</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Forward to API :8000</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Private IP</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Reply via ALB</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Stateful connection</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow3)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow3)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow3)\"/></svg>",
+  "flowDescription": "Resolve ALB DNS → TCP to ALB :80 → Forward to API :8000 → Reply via ALB.",
+  "breakItDrill": {
+    "title": "Remove an app ingress rule",
+    "scenario": "Remove the ALB-source rule on port 8000 in the manual lab.",
+    "symptom": "The ALB can be reachable while targets fail health checks.",
+    "fix": "Restore only the ALB security group as source; do not expose 8000 to the entire internet."
+  },
+  "assignment": {
+    "title": "Draw the two traffic paths",
+    "description": "Explain inbound client → ALB → API and outbound API → NAT → internet. Label subnet boundaries, security groups and ports.",
+    "completionHint": "Verify the result yourself, then complete the chapter checklist."
+  },
+  "recallNote": {
+    "keyTakeaway": "Routing creates a path; a security group permits a connection on that path.",
+    "bullets": [
+      "A NAT gateway is for outbound IPv4 access, not inbound ALB requests.",
+      "The ALB uses public subnets; tasks and data stay private.",
+      "One NAT and one database node are learning simplifications."
+    ]
+  },
+  "badgeTone": "amber",
+  "sources": [
+    {
+      "label": "VPC route tables",
+      "url": "https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Route_Tables.html"
+    },
+    {
+      "label": "VPC security groups",
+      "url": "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-security-groups.html"
+    }
+  ],
+  "checklist": [
+    {
+      "id": "w2-c1",
+      "text": "Explain CIDR ranges, ports, routing and stateful firewalls."
+    },
+    {
+      "id": "w2-c2",
+      "text": "Build public and private subnets across two Availability Zones."
+    },
+    {
+      "id": "w2-c3",
+      "text": "Trace inbound HTTP separately from outbound internet access."
+    },
+    {
+      "id": "w2-c4",
+      "text": "Diagnose routing and security-group failures independently."
+    }
+  ]
+}

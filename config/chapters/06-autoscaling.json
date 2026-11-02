@@ -1,0 +1,210 @@
+{
+  "week": 7,
+  "mode": "Metrics · Scaling · Load",
+  "title": "Scaling Fundamentals: Demand, Headroom & Queue Backlog",
+  "subtitle": "Use the simulator to distinguish service scaling, host scaling and the metrics that actually predict overload.",
+  "phase": "Build & Operate",
+  "analogy": "A queue is a waiting room. More receptionists do not make treatment faster if there are too few workers or no rooms. Scale the constrained stage using a metric that reflects its work.",
+  "objectives": [
+    "Interpret utilization, throughput, latency and queue backlog.",
+    "Explain why scaling reacts after demand changes.",
+    "Compare API CPU tracking with worker backlog-based scaling.",
+    "Run a bounded load test and observe the full system."
+  ],
+  "prerequisites": [
+    "A working local stack or isolated cloud lab.",
+    "Do not run the load example against a system you do not own."
+  ],
+  "lessons": [
+    {
+      "title": "Choose a metric that explains the bottleneck",
+      "body": [
+        "An API that only enqueues jobs may use little CPU even while the queue grows. CPU target tracking is a teaching example, not a reliable demand signal for every application. Request count per target or latency can be more useful for an API; queue age/backlog per worker can be more useful for background work.",
+        "A Redis stream length is not automatically current unfinished work because acknowledged entries may remain until trimming. Understand pending/unconsumed entries and consumer groups before publishing a backlog metric."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Scale-out has lag",
+      "body": [
+        "Metric collection, evaluation, scheduling, image pulls, startup and health checks all take time. Lower targets leave headroom, but higher minimum counts and scheduled prewarming may be needed for sharp bursts. There is no universal cold-start duration.",
+        "Scale in cautiously so tasks can drain work. Acknowledgement, timeouts, graceful shutdown and retriable/idempotent jobs must be designed together."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Read the simulator as a model",
+      "body": [
+        "The sliders use a synthetic demand curve and simplified per-task capacity. Red shading indicates modeled demand above ready capacity. The model omits network latency, database contention, real CloudWatch timing and queue internals.",
+        "Compare policies within the model; do not use its seconds or task counts as an AWS capacity promise. Capacity-provider target_capacity is a host reservation target, not a guarantee of exactly 20% spare physical RAM."
+      ],
+      "bullets": []
+    }
+  ],
+  "handHoldingSteps": [
+    "Try CPU target 85%, minimum 1 and boot time 90s in the simulator; then compare target 60% with more warm capacity. Observe overload duration rather than only the maximum task count.",
+    "For the cloud API exercise use minimum 2, maximum 8, CPU target 60%, scale-out cooldown 60s and scale-in cooldown 300s. The Terraform chapter defines these exact resources.",
+    "Generate a bounded batch of JSON requests and observe API errors, completion latency and worker logs. High API acceptance with slow completions points at background capacity, not necessarily HTTP capacity.",
+    "Record a hypothesis before changing a scaling setting. Change one setting at a time, measure, and restore the small learning configuration afterward."
+  ],
+  "concepts": [
+    "Utilization vs latency: Low CPU does not prove a healthy end-to-end user experience.",
+    "Two scaling loops: Service desired count changes replicas; EC2 managed scaling supplies placement capacity.",
+    "Model limits: Synthetic CPU demand is useful for learning feedback delay but does not reproduce a real queue."
+  ],
+  "commands": [
+    {
+      "command": "BASE_URL=http://localhost:8001\n# Cloud alternative: BASE_URL=http://YOUR_ALB_DNS\nfor i in $(seq 1 20); do\n  curl --fail --silent --show-error -X POST \"$BASE_URL/enqueue\" \\\n    -H \"Content-Type: application/json\" \\\n    -d \"{\\\"prompt\\\":\\\"bounded load job $i\\\"}\"\ndone",
+      "explanation": "Send only twenty sequential jobs. This is a bounded functional workload, not a production throughput benchmark.",
+      "expected": "Every accepted request returns a job ID; completions appear over time."
+    },
+    {
+      "command": "docker compose logs --since=2m worker\ncurl -s http://localhost:8001/jobs",
+      "explanation": "Compare acceptance and completion. /jobs shows only the newest 20 rows, not a complete queue metric.",
+      "expected": "Completed jobs accumulate without assuming they finish in submission order."
+    },
+    {
+      "command": "aws ecs describe-services --cluster YOUR_CLUSTER --services YOUR_API_SERVICE\naws application-autoscaling describe-scalable-targets --service-namespace ecs",
+      "explanation": "Inspect service counts and registered scaling bounds in the cloud lab.",
+      "expected": "The API is bounded between 2 and 8 when scaling is enabled."
+    }
+  ],
+  "codeFiles": [
+    {
+      "filename": "infra/05-scaling.tf",
+      "code": "resource \"aws_appautoscaling_target\" \"api\" {\n  count              = var.enable_services ? 1 : 0\n  min_capacity       = 2\n  max_capacity       = 8\n  resource_id        = \"service/${aws_ecs_cluster.main.name}/${aws_ecs_service.api[0].name}\"\n  scalable_dimension = \"ecs:service:DesiredCount\"\n  service_namespace  = \"ecs\"\n}\nresource \"aws_appautoscaling_policy\" \"api_cpu\" {\n  count              = var.enable_services ? 1 : 0\n  name               = \"${var.project_name}-api-cpu\"\n  policy_type        = \"TargetTrackingScaling\"\n  resource_id        = aws_appautoscaling_target.api[0].resource_id\n  scalable_dimension = aws_appautoscaling_target.api[0].scalable_dimension\n  service_namespace  = aws_appautoscaling_target.api[0].service_namespace\n  target_tracking_scaling_policy_configuration {\n    target_value       = 60\n    scale_out_cooldown = 60\n    scale_in_cooldown  = 300\n    predefined_metric_specification {\n      predefined_metric_type = \"ECSServiceAverageCPUUtilization\"\n    }\n  }\n}\n",
+      "language": "hcl",
+      "description": "CPU target tracking for the API, not the background queue. Use with the complete Chapter 8 stack.",
+      "walkthrough": [
+        {
+          "title": "Scalable target",
+          "explanation": "Registers the service desired count and its minimum/maximum. The ECS cluster/service names form the resource ID."
+        },
+        {
+          "title": "Tracking policy",
+          "explanation": "AWS adjusts desired count toward a metric target. The main API service ignores desired_count drift so Terraform does not undo autoscaling."
+        }
+      ]
+    }
+  ],
+  "svgDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Architecture 7\" class=\"course-diagram\"><title>Architecture 7</title><defs><marker id=\"arrow-Architecture\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">API replicas</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Enqueue requests</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Queue backlog</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Work waiting + pending</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Worker replicas</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Process jobs</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Database capacity</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Connections + writes</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Architecture)\"/></svg>",
+  "architectureDescription": "HTTP acceptance, queue work, worker capacity and database writes are separate bottlenecks. Observe each stage rather than using API CPU as a universal measure of unfinished work.",
+  "flowDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Flow 7\" class=\"course-diagram\"><title>Flow 7</title><defs><marker id=\"arrow-Flow7\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Observe metric</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Measure bottleneck</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Evaluate policy</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Target + bounds</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Request capacity</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">New replicas</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Wait for readiness</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Startup delay</text><rect x=\"300\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Measure again</text><text x=\"420\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Feedback loop</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow7)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow7)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow7)\"/><path d=\"M575,237 L540,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow7)\"/></svg>",
+  "flowDescription": "Observe metric → Evaluate policy → Request capacity → Wait for readiness → Measure again.",
+  "breakItDrill": {
+    "title": "Scale the wrong component",
+    "scenario": "Stop the worker locally, keep the API running, and submit a few jobs.",
+    "symptom": "HTTP can remain responsive while completion time increases. Adding API replicas would not restore missing workers.",
+    "fix": "Restart the worker and choose a metric associated with processing demand."
+  },
+  "assignment": {
+    "title": "Write a scaling hypothesis",
+    "description": "Explain when CPU tracking is appropriate, define a backlog-per-worker metric, and describe how you would measure pending jobs without treating total stream length as backlog.",
+    "completionHint": "Verify the result yourself, then complete the chapter checklist."
+  },
+  "recallNote": {
+    "keyTakeaway": "Scale the bottleneck and account for the delay before new capacity becomes ready.",
+    "bullets": [
+      "Use bounded experiments.",
+      "An accepted job is not a completed job.",
+      "A simulator illustrates a feedback loop, not a cloud SLA."
+    ]
+  },
+  "badgeTone": "amber",
+  "sources": [
+    {
+      "label": "ECS service autoscaling",
+      "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html"
+    },
+    {
+      "label": "Redis Streams",
+      "url": "https://redis.io/docs/latest/develop/data-types/streams/"
+    }
+  ],
+  "checklist": [
+    {
+      "id": "w6-c1",
+      "text": "Interpret utilization, throughput, latency and queue backlog."
+    },
+    {
+      "id": "w6-c2",
+      "text": "Explain why scaling reacts after demand changes."
+    },
+    {
+      "id": "w6-c3",
+      "text": "Compare API CPU tracking with worker backlog-based scaling."
+    },
+    {
+      "id": "w6-c4",
+      "text": "Run a bounded load test and observe the full system."
+    }
+  ],
+  "simulator": {
+    "controls": {
+      "cpu": {
+        "label": "Target CPU",
+        "min": 40,
+        "max": 90,
+        "step": 5,
+        "value": 60,
+        "unit": "%"
+      },
+      "min": {
+        "label": "Min Tasks",
+        "min": 1,
+        "max": 5,
+        "step": 1,
+        "value": 2,
+        "unit": ""
+      },
+      "max": {
+        "label": "Max Tasks",
+        "min": 2,
+        "max": 12,
+        "step": 1,
+        "value": 8,
+        "unit": ""
+      },
+      "boot": {
+        "label": "Boot Time",
+        "min": 15,
+        "max": 120,
+        "step": 15,
+        "value": 45,
+        "unit": "s"
+      },
+      "cool": {
+        "label": "Scale-In Wait",
+        "min": 60,
+        "max": 600,
+        "step": 60,
+        "value": 300,
+        "unit": "s"
+      }
+    },
+    "scenario": {
+      "steps": 80,
+      "stepSeconds": 15,
+      "capacityPerTask": 100,
+      "chartMax": 1200,
+      "baseDemand": 110,
+      "schedulingDelaySteps": 3,
+      "scaleInThreshold": 0.65,
+      "waves": [
+        {
+          "start": 12,
+          "end": 38,
+          "baseline": 110,
+          "amplitude": 420
+        },
+        {
+          "start": 38,
+          "end": 56,
+          "baseline": 140,
+          "amplitude": 260
+        }
+      ]
+    },
+    "caption": "20m synthetic wave"
+  }
+}

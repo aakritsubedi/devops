@@ -1,0 +1,155 @@
+{
+  "week": 5,
+  "mode": "ECR · ECS Fargate · ALB",
+  "title": "Ship the Image: ECR, Fargate & the Load Balancer",
+  "subtitle": "Learn the difference between an image, a task definition, a running task and a service.",
+  "phase": "Build & Operate",
+  "analogy": "The image is a sealed software package, the task definition is a launch form, a task is one running copy, and the service keeps the requested number of copies alive.",
+  "objectives": [
+    "Build and publish an immutable, architecture-matched image.",
+    "Create API and worker task definitions using the same image.",
+    "Run a migration task before starting the services.",
+    "Explain ALB target health, readiness, deployment and rollback."
+  ],
+  "prerequisites": [
+    "Complete the manual network/data/role setup, or follow the complete Terraform path in Chapter 8 instead.",
+    "Commit your app changes first so the Git SHA names the code actually built."
+  ],
+  "lessons": [
+    {
+      "title": "Image versus running infrastructure",
+      "body": [
+        "An image tag selects a version; an image digest identifies exact image content. Task definitions are versioned launch configuration. Updating an ECR tag alone does not update an already running task; register a new revision and update the service.",
+        "Build linux/amd64 for this course’s X86_64 tasks and t3 hosts. ARM64 is also valid when the image and task/host architecture match; do not mix architectures accidentally."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "ALB health and graceful deployments",
+      "body": [
+        "Fargate awsvpc tasks have their own private IPs, so the target group uses target_type=ip. The lab target is port 8000 and /ready. /health is process liveness; /ready checks the database. A healthy task does not prove that a background job has completed.",
+        "Use a startup grace period, connection draining, and a deployment circuit breaker. Rollback requires a previous completed deployment; a first deployment with no healthy revision has nothing to roll back to."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Deploy in dependency order",
+      "body": [
+        "Create network/data/roles and an ECR repository. Push the image. Register task definitions. Run python -m app.migrate once using the API definition with a command override. Verify exit code 0, then start API and worker services.",
+        "Schema migrations are a deployment concern. A growing system needs backward-compatible changes so old and new tasks can overlap during rolling deployment."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "The HTTP boundary",
+      "body": [
+        "The public ALB terminates client connections; it forwards only API requests, never worker jobs. The lab uses HTTP to avoid requiring a domain. Before real users, attach an ACM certificate, use HTTPS and add authentication/rate limiting."
+      ],
+      "bullets": []
+    }
+  ],
+  "handHoldingSteps": [
+    "Create ECR bootcamp-manual-app with immutable tags and create log group /ecs/bootcamp-manual. Build and push the committed source with the commands below.",
+    "Replace every placeholder in the task definition. Register the API revision. Make a worker definition from the same image: name worker, command taskiq worker app.tasks:broker, no portMappings, and a worker log stream prefix.",
+    "Create ECS cluster bootcamp-manual-cluster. Run the API task definition once with command python -m app.migrate in private subnets/app-sg, no public IP. Inspect its stopped reason and api container exit code before proceeding.",
+    "Create an IP target group on 8000 with /ready, then a public ALB across both public subnets. Forward listener port 80 to the target group.",
+    "Create an API Fargate service with two tasks and the ALB attachment; create a worker service with one task and no ALB. Set 60-second health-check grace and deployment circuit-breaker rollback.",
+    "Test /enqueue using a JSON body through the ALB and wait for /jobs. Inspect logs for the same job ID rather than relying only on the service’s running count."
+  ],
+  "concepts": [
+    "Image immutability: A new Git SHA tag is a new release; do not deploy a mutable latest tag.",
+    "Task definition: Configuration is versioned independently from running service instances.",
+    "Readiness: ALB checks only whether a target should receive traffic, not whether all business functions are healthy."
+  ],
+  "commands": [
+    {
+      "command": "aws ecr create-repository --repository-name bootcamp-manual-app --image-tag-mutability IMMUTABLE\naws logs create-log-group --log-group-name /ecs/bootcamp-manual\nECR_URL=$(aws ecr describe-repositories --repository-names bootcamp-manual-app --query 'repositories[0].repositoryUri' --output text)\nIMAGE_TAG=$(git rev-parse HEAD)\nREGISTRY=\"${ECR_URL%%/*}\"\naws ecr get-login-password --region \"$AWS_REGION\" | docker login --username AWS --password-stdin \"$REGISTRY\"\ndocker build --platform linux/amd64 -t \"$ECR_URL:$IMAGE_TAG\" .\ndocker push \"$ECR_URL:$IMAGE_TAG\"",
+      "explanation": "Run from the backend root, after committing changes. Create resources only once; describe existing resources on later releases.",
+      "expected": "An image tagged with the source Git SHA exists in ECR."
+    },
+    {
+      "command": "aws ecs register-task-definition --cli-input-json file://task-definition.json\naws ecs list-tasks --cluster bootcamp-manual-cluster\naws logs tail /ecs/bootcamp-manual --since 10m --follow",
+      "explanation": "Save the edited task definition as task-definition.json. Inspect tasks and logs while deploying.",
+      "expected": "The task-definition ARN includes a revision; logs show application startup."
+    },
+    {
+      "command": "curl -i -X POST \"http://YOUR_ALB_DNS/enqueue\" -H \"Content-Type: application/json\" -d '{\"prompt\":\"hello cloud\"}'\nsleep 3\ncurl -s \"http://YOUR_ALB_DNS/jobs\"",
+      "explanation": "Use the manual ALB DNS name, not a private task address.",
+      "expected": "202 followed by a completed word-count result."
+    }
+  ],
+  "codeFiles": [
+    {
+      "filename": "task-definition.json",
+      "code": "{\n  \"family\": \"bootcamp-manual-api\",\n  \"networkMode\": \"awsvpc\",\n  \"requiresCompatibilities\": [\n    \"FARGATE\"\n  ],\n  \"cpu\": \"256\",\n  \"memory\": \"512\",\n  \"executionRoleArn\": \"arn:aws:iam::ACCOUNT_ID:role/bootcamp-manual-execution\",\n  \"taskRoleArn\": \"arn:aws:iam::ACCOUNT_ID:role/bootcamp-manual-task\",\n  \"runtimePlatform\": {\n    \"cpuArchitecture\": \"X86_64\",\n    \"operatingSystemFamily\": \"LINUX\"\n  },\n  \"containerDefinitions\": [\n    {\n      \"name\": \"api\",\n      \"image\": \"ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/bootcamp-manual-app:IMAGE_TAG\",\n      \"essential\": true,\n      \"command\": [\n        \"uvicorn\",\n        \"app.main:app\",\n        \"--host\",\n        \"0.0.0.0\",\n        \"--port\",\n        \"8000\"\n      ],\n      \"portMappings\": [\n        {\n          \"containerPort\": 8000,\n          \"protocol\": \"tcp\"\n        }\n      ],\n      \"environment\": [\n        {\n          \"name\": \"DB_HOST\",\n          \"value\": \"RDS_HOST\"\n        },\n        {\n          \"name\": \"DB_NAME\",\n          \"value\": \"appdb\"\n        },\n        {\n          \"name\": \"DB_USER\",\n          \"value\": \"appuser\"\n        },\n        {\n          \"name\": \"DB_SSLMODE\",\n          \"value\": \"require\"\n        },\n        {\n          \"name\": \"REDIS_URL\",\n          \"value\": \"rediss://VALKEY_ENDPOINT:6379/0\"\n        }\n      ],\n      \"secrets\": [\n        {\n          \"name\": \"DB_PASSWORD\",\n          \"valueFrom\": \"DB_SECRET_ARN:password::\"\n        }\n      ],\n      \"logConfiguration\": {\n        \"logDriver\": \"awslogs\",\n        \"options\": {\n          \"awslogs-group\": \"/ecs/bootcamp-manual\",\n          \"awslogs-region\": \"us-east-1\",\n          \"awslogs-stream-prefix\": \"api\"\n        }\n      }\n    }\n  ]\n}\n",
+      "description": "Complete manual API definition. Replace account IDs, image tag, roles, secret ARN, and endpoints. Create the log group first.",
+      "language": "json",
+      "walkthrough": [
+        {
+          "title": "awsvpc and target type",
+          "explanation": "Every Fargate task receives a private network interface. The ALB registers that IP and container port."
+        },
+        {
+          "title": "command",
+          "explanation": "The image already contains an environment with uvicorn on PATH. Use the package path app.main:app, not the old main:app."
+        },
+        {
+          "title": "logging and secrets",
+          "explanation": "awslogs needs the execution-role policy and a pre-existing log group. A DB_PASSWORD JSON-key ARN requires a compatible Fargate platform version; current Linux 1.4+ supports it."
+        }
+      ]
+    }
+  ],
+  "svgDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 650\" role=\"img\" aria-label=\"AWS application architecture and trust boundaries\" class=\"course-diagram\"><title>AWS application architecture and trust boundaries</title><defs><marker id=\"graph-arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"130\" width=\"900\" height=\"380\" rx=\"14\" class=\"diagram-boundary\"/><text x=\"41\" y=\"155\" class=\"diagram-group\">PRIVATE SUBNETS · TWO AZs</text><path d=\"M215,63 L270,63\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"242\" y=\"45\" class=\"diagram-edge-label\" text-anchor=\"middle\">HTTP</text><path d=\"M395,101 L395,155 L165,155 L165,225\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"285\" y=\"145\" class=\"diagram-edge-label\" text-anchor=\"middle\">Forward :8000</text><path d=\"M275,263 L355,263\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"315\" y=\"247\" class=\"diagram-edge-label\" text-anchor=\"middle\">Enqueue</text><path d=\"M655,263 L575,263\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"615\" y=\"247\" class=\"diagram-edge-label\" text-anchor=\"middle\">Consume / ACK</text><path d=\"M165,301 L165,400\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"100\" y=\"355\" class=\"diagram-edge-label\" text-anchor=\"middle\">Read results</text><path d=\"M775,301 L775,350 L330,350 L330,438\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"490\" y=\"340\" class=\"diagram-edge-label\" text-anchor=\"middle\">Write result</text><path d=\"M765,101 L765,165 L775,165 L775,225\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"785\" y=\"145\" class=\"diagram-edge-label\" text-anchor=\"middle\">Pull image / emit logs</text><path d=\"M615,588 L555,588 L555,385 L245,385 L245,301\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"450\" y=\"420\" class=\"diagram-edge-label\" text-anchor=\"middle\">Inject at startup</text><rect x=\"25\" y=\"25\" width=\"190\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"120.0\" y=\"56\" text-anchor=\"middle\" class=\"diagram-title\">Client</text><text x=\"120.0\" y=\"78\" text-anchor=\"middle\" class=\"diagram-detail\">HTTP :80 in this lab</text><rect x=\"270\" y=\"25\" width=\"250\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"395.0\" y=\"56\" text-anchor=\"middle\" class=\"diagram-title\">Application Load Balancer</text><text x=\"395.0\" y=\"78\" text-anchor=\"middle\" class=\"diagram-detail\">Public subnets · two AZs</text><rect x=\"630\" y=\"25\" width=\"270\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"765.0\" y=\"56\" text-anchor=\"middle\" class=\"diagram-title\">ECR / CloudWatch</text><text x=\"765.0\" y=\"78\" text-anchor=\"middle\" class=\"diagram-detail\">Images and application logs</text><rect x=\"55\" y=\"225\" width=\"220\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"165.0\" y=\"256\" text-anchor=\"middle\" class=\"diagram-title\">FastAPI service</text><text x=\"165.0\" y=\"278\" text-anchor=\"middle\" class=\"diagram-detail\">Fargate · private IP :8000</text><rect x=\"355\" y=\"225\" width=\"220\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"465.0\" y=\"256\" text-anchor=\"middle\" class=\"diagram-title\">Valkey stream</text><text x=\"465.0\" y=\"278\" text-anchor=\"middle\" class=\"diagram-detail\">TLS :6379 · private endpoint</text><rect x=\"655\" y=\"225\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"775.0\" y=\"256\" text-anchor=\"middle\" class=\"diagram-title\">TaskIQ worker</text><text x=\"775.0\" y=\"278\" text-anchor=\"middle\" class=\"diagram-detail\">Fargate or optional EC2</text><rect x=\"70\" y=\"400\" width=\"260\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"200.0\" y=\"431\" text-anchor=\"middle\" class=\"diagram-title\">PostgreSQL 17</text><text x=\"200.0\" y=\"453\" text-anchor=\"middle\" class=\"diagram-detail\">TLS :5432 · private database</text><rect x=\"615\" y=\"550\" width=\"300\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"765.0\" y=\"581\" text-anchor=\"middle\" class=\"diagram-title\">Secrets Manager / IAM</text><text x=\"765.0\" y=\"603\" text-anchor=\"middle\" class=\"diagram-detail\">Startup secret · execution role</text></svg>",
+  "architectureDescription": "ECR supplies the image; task definitions describe the API and worker; Fargate starts them privately. The ALB routes HTTP only to API targets. The worker does not have an ALB connection.",
+  "flowDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Flow 5\" class=\"course-diagram\"><title>Flow 5</title><defs><marker id=\"arrow-Flow5\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Build + push</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Committed source SHA</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Register revision</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Image + settings</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Run migration</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Exit code must be 0</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Start services</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Private subnets</text><rect x=\"300\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Check /ready</text><text x=\"420\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">ALB target health</text><rect x=\"25\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Submit + poll</text><text x=\"145\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Business-path verification</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow5)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow5)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow5)\"/><path d=\"M575,237 L540,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow5)\"/><path d=\"M300,237 L265,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow5)\"/></svg>",
+  "flowDescription": "Build + push → Register revision → Run migration → Start services → Check /ready → Submit + poll.",
+  "breakItDrill": {
+    "title": "Break the readiness path",
+    "scenario": "Change the target health path to /not-found in the manual lab.",
+    "symptom": "Targets fail health checks even though the application process is running.",
+    "fix": "Restore /ready, verify database reachability, and observe healthy targets."
+  },
+  "assignment": {
+    "title": "Perform a controlled release",
+    "description": "Change the application title, commit, build a new SHA image and deploy a new task-definition revision. Explain how you would choose a known-good image for rollback.",
+    "completionHint": "Verify the result yourself, then complete the chapter checklist."
+  },
+  "recallNote": {
+    "keyTakeaway": "Publish the image, migrate the schema, then start and verify the services.",
+    "bullets": [
+      "Fargate uses awsvpc and IP target groups.",
+      "Worker services have no public listener or load balancer.",
+      "A task count is not an end-to-end success check."
+    ]
+  },
+  "badgeTone": "amber",
+  "sources": [
+    {
+      "label": "ECS task definitions",
+      "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definitions.html"
+    },
+    {
+      "label": "ECS ALB integration",
+      "url": "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/alb.html"
+    }
+  ],
+  "checklist": [
+    {
+      "id": "w4-c1",
+      "text": "Build and publish an immutable, architecture-matched image."
+    },
+    {
+      "id": "w4-c2",
+      "text": "Create API and worker task definitions using the same image."
+    },
+    {
+      "id": "w4-c3",
+      "text": "Run a migration task before starting the services."
+    },
+    {
+      "id": "w4-c4",
+      "text": "Explain ALB target health, readiness, deployment and rollback."
+    }
+  ]
+}

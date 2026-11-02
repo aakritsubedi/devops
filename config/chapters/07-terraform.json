@@ -1,0 +1,455 @@
+{
+  "week": 8,
+  "mode": "Terraform · AWS provider 6",
+  "title": "Terraform from First Principles: Read, Plan & Build the Stack",
+  "subtitle": "Learn HCL and state, then deploy a connected infrastructure lab with a deliberate image/migration bootstrap.",
+  "phase": "Build & Operate",
+  "analogy": "Terraform is a planner with a ledger. HCL describes the desired infrastructure; state records which remote objects it manages. The plan compares configuration, recorded addresses and observed cloud objects before proposing changes.",
+  "objectives": [
+    "Read resource blocks, references, expressions, variables and outputs.",
+    "Explain state, dependency graphs, drift, replacement and provider lockfiles.",
+    "Build the network, data, identity, container and scaling layers in the right order.",
+    "Inspect a saved plan, deploy an immutable image, migrate, and verify the complete result."
+  ],
+  "prerequisites": [
+    "The local application passes tests and you understand Chapters 3–7.",
+    "Terraform 1.11+ and AWS CLI v2 are installed; SSO is authenticated to the intended account.",
+    "This is a new bootcamp-iac stack. Manually created resources from earlier exercises are not automatically imported; clean them up separately or budget for both stacks."
+  ],
+  "lessons": [
+    {
+      "title": "Read HCL instead of memorizing resource names",
+      "body": [
+        "A `resource` block manages a remote object. Its two labels identify its type and local name, for example aws_vpc.main. Arguments configure it. A `data` block reads an existing value, such as AWS’s ECS AMI parameter. An `output` exposes a result for a person or another tool.",
+        "`var.project_name` reads an input; `local.roles` reads a reusable expression. `count` creates indexed instances, while `for_each` creates instances keyed by stable strings. `aws_subnet.private[*].id` collects all private subnet IDs. `jsonencode` converts structured HCL into the JSON expected by ECS or IAM."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Dependencies come from values, not filenames",
+      "body": [
+        "Terraform loads all .tf files in a directory as one module. Numeric file prefixes help humans read; they do not control creation order. A subnet referencing aws_vpc.main.id depends on the VPC regardless of file names.",
+        "Use depends_on only for dependencies not already represented by a value. The API service references its target group but also waits for the listener and startup policies, because those readiness requirements are not fully represented by the task-definition ARN."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "State and two kinds of lockfile",
+      "body": [
+        "State maps resource addresses to cloud IDs; never commit it or treat it as a harmless cache. Sensitive output flags redact display but do not remove values from state. This lab avoids reading the generated RDS password into state.",
+        "`.terraform.lock.hcl` records provider selections and checksums; commit it. The S3 `.tflock` object coordinates concurrent state writers; do not commit or manually delete it. These are different from uv.lock, which resolves Python packages."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "What init, plan and apply actually do",
+      "body": [
+        "init installs providers and configures a backend. fmt formats HCL. validate checks structure and provider schemas without provisioning. plan refreshes observed state by default and proposes a diff. apply executes the reviewed plan; it can fail partially, leaving successfully created resources recorded in state.",
+        "Read create (+), update (~), destroy (-) and replacement (-/+) carefully. Creating a database takes real time and may incur charges; neither a fixed seven-minute deployment nor automatic typo prevention is guaranteed. A valid configuration is not proof of account permissions, quotas or regional engine availability."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Bootstrap the application in phases",
+      "body": [
+        "Copy only 00-versions.tf through 06-ec2.tf and outputs.tf for this chapter. enable_services=false creates foundations and task definitions without trying to pull an unpublished image. It also leaves the optional EC2 group at zero hosts.",
+        "First provision foundations. Then publish the image, persist its tag in a local ignored auto.tfvars file, update task definitions, run the one-off migration and check its exit code. Only then enable the services. Subsequent releases must preserve these inputs; a missing enable_services flag would plan to remove the services."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Understand the lab tradeoffs",
+      "body": [
+        "The baseline has two public/private subnets, one NAT, a private single-instance database and a single TLS cache node. The API uses Fargate; the worker can use Fargate or optionally an EC2 capacity provider.",
+        "Deletion protection and final snapshots are disabled only for the disposable lab. Production needs HTTPS/authentication, restricted DB users, verified TLS, cache ACLs/failover, backup/restore tests and a reviewed access policy. A plan may reveal infrastructure changes as well as a new app image."
+      ],
+      "bullets": []
+    }
+  ],
+  "handHoldingSteps": [
+    "Create infra/ and copy the complete runnable file set below, excluding hcl-fundamentals.tf.txt and the optional backend example. Do not paste reading fragments as extra resources.",
+    "Authenticate with SSO. Run init, fmt and validate. Commit .terraform.lock.hcl. Use the foundations plan to inspect costs and resource changes before apply.",
+    "Build and push the image to the Terraform-created ECR URL. Save image_tag and enable_services=false to infra/release.auto.tfvars; that file is intentionally ignored and contains settings, not credentials.",
+    "Apply the image-only configuration update so the API task definition points to the pushed tag. Run the migration command, wait for the task to stop and confirm exit code 0. If it fails, inspect stoppedReason/container reason and logs before proceeding.",
+    "Change enable_services to true in release.auto.tfvars. Plan and apply again, wait for stable services and test the ALB business path. Keep this settings file for later plan/destroy commands.",
+    "Optionally set worker_on_ec2=true in the same settings file and review the plan: it replaces the worker service location and starts host capacity. This creates a processing transition; schedule it deliberately.",
+    "Before collaborating or using a Terraform pipeline, provision a separate private/versioned state bucket, copy backend.tf.example to backend.tf and migrate state. Do not place the backend bucket under this application stack’s destroy lifecycle."
+  ],
+  "concepts": [
+    "Declarative desired state: Terraform chooses an execution graph; line order is not a shell script.",
+    "Implicit reference: Reading another resource’s attribute creates a dependency automatically.",
+    "State ownership: Changing HCL does not automatically adopt console-created objects; import is a deliberate mapping operation.",
+    "Drift: Plan can show out-of-band changes, but only for attributes managed/read by the provider; it is not a universal cloud security audit.",
+    "Lifecycle boundaries: Terraform manages service configuration; Application Auto Scaling owns API desired_count after registration."
+  ],
+  "commands": [
+    {
+      "command": "aws sts get-caller-identity\nterraform -chdir=infra init\nterraform -chdir=infra fmt -check\nterraform -chdir=infra validate\ngit add infra/.terraform.lock.hcl",
+      "explanation": "Verify identity and initialize the provider. No AWS resources are created by init/validate.",
+      "expected": "Valid HCL/provider schema; provider lockfile staged for review."
+    },
+    {
+      "command": "terraform -chdir=infra plan -out=foundations.tfplan\nterraform -chdir=infra show foundations.tfplan\nterraform -chdir=infra apply foundations.tfplan",
+      "explanation": "The default enable_services=false provisions foundations only. Review the plan before running apply. Saved plans may contain sensitive information; keep them out of Git.",
+      "expected": "Network, data, ECR, roles and task definitions exist; no API/worker service runs yet."
+    },
+    {
+      "command": "ECR_URL=$(terraform -chdir=infra output -raw ecr_url)\nIMAGE_TAG=$(git rev-parse HEAD)\nREGISTRY=\"${ECR_URL%%/*}\"\naws ecr get-login-password --region \"$AWS_REGION\" | docker login --username AWS --password-stdin \"$REGISTRY\"\ndocker build --platform linux/amd64 -t \"$ECR_URL:$IMAGE_TAG\" .\ndocker push \"$ECR_URL:$IMAGE_TAG\"\nprintf 'image_tag = \"%s\"\\nenable_services = false\\nworker_on_ec2 = false\\n' \"$IMAGE_TAG\" > infra/release.auto.tfvars\nterraform -chdir=infra plan -out=image.tfplan\nterraform -chdir=infra apply image.tfplan",
+      "explanation": "Commit source before selecting the SHA. Persist release inputs so later plans do not fall back to bootstrap/disabled defaults.",
+      "expected": "Both task-definition families reference the published image."
+    },
+    {
+      "command": "run_migration() {\n  CLUSTER=$(terraform -chdir=infra output -raw cluster_name) || return\n  TASK_DEF=$(terraform -chdir=infra output -raw migration_task_definition) || return\n  NETWORK=$(terraform -chdir=infra output -raw migration_network) || return\n  MIGRATION_TASK=$(aws ecs run-task --cluster \"$CLUSTER\" --launch-type FARGATE \\\n    --task-definition \"$TASK_DEF\" --network-configuration \"$NETWORK\" \\\n    --overrides '{\"containerOverrides\":[{\"name\":\"api\",\"command\":[\"python\",\"-m\",\"app.migrate\"]}]}' \\\n    --query 'tasks[0].taskArn' --output text) || return\n  test \"$MIGRATION_TASK\" != None || return 1\n  aws ecs wait tasks-stopped --cluster \"$CLUSTER\" --tasks \"$MIGRATION_TASK\" || return\n  EXIT_CODE=$(aws ecs describe-tasks --cluster \"$CLUSTER\" --tasks \"$MIGRATION_TASK\" --query 'tasks[0].containers[0].exitCode' --output text) || return\n  test \"$EXIT_CODE\" = 0\n}\nrun_migration",
+      "explanation": "Run inside the private network using the task definition’s secret/settings. If run-task returns failures, do not continue; inspect its response and CloudWatch logs. The function returns immediately on an AWS/CLI failure; do not enable services unless it returns success.",
+      "expected": "The one-off migration exits 0 before services are enabled."
+    },
+    {
+      "command": "# Edit release.auto.tfvars: keep image_tag and set enable_services = true.\nterraform -chdir=infra plan -out=services.tfplan\nterraform -chdir=infra apply services.tfplan\naws ecs wait services-stable --cluster \"$CLUSTER\" --services bootcamp-iac-api bootcamp-iac-worker\nBASE_URL=$(terraform -chdir=infra output -raw alb_url)\ncurl --fail \"$BASE_URL/ready\"\ncurl -i -X POST \"$BASE_URL/enqueue\" -H \"Content-Type: application/json\" -d '{\"prompt\":\"hello Terraform\"}'\nsleep 3\ncurl --fail \"$BASE_URL/jobs\"",
+      "explanation": "Apply the reviewed service plan, then verify the real request-to-result path. If worker_on_ec2=true, wait for bootcamp-iac-worker-ec2 instead.",
+      "expected": "Healthy targets and a completed database result."
+    },
+    {
+      "command": "aws s3api create-bucket --bucket YOUR_GLOBALLY_UNIQUE_STATE_BUCKET --region us-east-1\naws s3api put-public-access-block --bucket YOUR_GLOBALLY_UNIQUE_STATE_BUCKET --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true\naws s3api put-bucket-versioning --bucket YOUR_GLOBALLY_UNIQUE_STATE_BUCKET --versioning-configuration Status=Enabled\ncp infra/backend.tf.example infra/backend.tf\nterraform -chdir=infra init -migrate-state -backend-config=\"bucket=YOUR_GLOBALLY_UNIQUE_STATE_BUCKET\" -backend-config=\"region=us-east-1\"",
+      "explanation": "Optional collaboration setup, using a separate bucket. Replace the bucket name; the create-bucket syntax shown is for us-east-1. Preserve the state migration backup securely. Backend access needs state object read/write and lock-object read/write/delete permissions.",
+      "expected": "State migrates to private versioned S3 with native use_lockfile locking; no DynamoDB table is required."
+    }
+  ],
+  "codeFiles": [
+    {
+      "filename": "hcl-fundamentals.tf.txt",
+      "code": "# This is a reading example, not another file to apply.\nvariable \"project_name\" {\n  type    = string\n  default = \"bootcamp-iac\"\n}\n\nresource \"aws_vpc\" \"main\" {\n  cidr_block = \"10.42.0.0/16\"\n}\n\nresource \"aws_subnet\" \"example\" {\n  vpc_id     = aws_vpc.main.id\n  cidr_block = \"10.42.10.0/24\"\n}\n\noutput \"vpc_id\" {\n  value = aws_vpc.main.id\n}\n",
+      "description": "Read HCL structure before copying the complete file set below.",
+      "language": "hcl",
+      "walkthrough": [
+        {
+          "title": "Block type and labels",
+          "explanation": "resource is the block type; aws_vpc is the provider resource type; main is your local label. Together aws_vpc.main is an address, not the AWS display name."
+        },
+        {
+          "title": "Arguments and values",
+          "explanation": "cidr_block is an argument assigned a string. Booleans use true/false without quotes; lists use brackets and maps use braces."
+        },
+        {
+          "title": "References",
+          "explanation": "aws_vpc.main.id reads an attribute of another resource. Terraform records that dependency; it is not a shell variable."
+        },
+        {
+          "title": "Variables, locals, data and outputs",
+          "explanation": "Variables are inputs, locals name expressions, data sources read existing information, resources manage lifecycle, and outputs expose selected results."
+        }
+      ]
+    },
+    {
+      "filename": "infra/00-versions.tf",
+      "code": "terraform {\n  required_version = \">= 1.11, < 2.0\"\n  required_providers {\n    aws = {\n      source  = \"hashicorp/aws\"\n      version = \"~> 6.0\"\n    }\n  }\n}\n\nprovider \"aws\" {\n  region = var.aws_region\n  default_tags {\n    tags = { Project = var.project_name, Environment = \"learning\" }\n  }\n}\n\nvariable \"aws_region\" {\n  type    = string\n  default = \"us-east-1\"\n}\nvariable \"project_name\" {\n  type    = string\n  default = \"bootcamp-iac\"\n}\nvariable \"image_tag\" {\n  type    = string\n  default = \"bootstrap\"\n}\nvariable \"enable_services\" {\n  type    = bool\n  default = false\n}\nvariable \"worker_on_ec2\" {\n  type    = bool\n  default = false\n}\n\n# The provider selection belongs in .terraform.lock.hcl; commit that file.\n# Account identity comes from AWS_PROFILE / Identity Center, never .tf secrets.\n",
+      "language": "hcl",
+      "description": "Provider constraints, region, typed inputs and explicit disabled-service bootstrap.",
+      "walkthrough": []
+    },
+    {
+      "filename": "infra/01-network.tf",
+      "code": "data \"aws_availability_zones\" \"available\" {\n  state = \"available\"\n}\n\nresource \"aws_vpc\" \"main\" {\n  cidr_block           = \"10.42.0.0/16\"\n  enable_dns_support   = true\n  enable_dns_hostnames = true\n}\nresource \"aws_internet_gateway\" \"main\" {\n  vpc_id = aws_vpc.main.id\n}\nresource \"aws_subnet\" \"public\" {\n  count             = 2\n  vpc_id            = aws_vpc.main.id\n  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index)\n  availability_zone = data.aws_availability_zones.available.names[count.index]\n}\nresource \"aws_subnet\" \"private\" {\n  count             = 2\n  vpc_id            = aws_vpc.main.id\n  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 10)\n  availability_zone = data.aws_availability_zones.available.names[count.index]\n}\nresource \"aws_eip\" \"nat\" {\n  domain = \"vpc\"\n}\nresource \"aws_nat_gateway\" \"main\" {\n  allocation_id = aws_eip.nat.id\n  subnet_id     = aws_subnet.public[0].id\n  depends_on    = [aws_internet_gateway.main]\n}\nresource \"aws_route_table\" \"public\" {\n  vpc_id = aws_vpc.main.id\n  route {\n    cidr_block = \"0.0.0.0/0\"\n    gateway_id = aws_internet_gateway.main.id\n  }\n}\nresource \"aws_route_table\" \"private\" {\n  vpc_id = aws_vpc.main.id\n  route {\n    cidr_block     = \"0.0.0.0/0\"\n    nat_gateway_id = aws_nat_gateway.main.id\n  }\n}\nresource \"aws_route_table_association\" \"public\" {\n  count          = 2\n  subnet_id      = aws_subnet.public[count.index].id\n  route_table_id = aws_route_table.public.id\n}\nresource \"aws_route_table_association\" \"private\" {\n  count          = 2\n  subnet_id      = aws_subnet.private[count.index].id\n  route_table_id = aws_route_table.private.id\n}\n\nresource \"aws_security_group\" \"alb\" {\n  name_prefix = \"${var.project_name}-alb-\"\n  vpc_id      = aws_vpc.main.id\n  ingress {\n    description = \"HTTP demonstration; add ACM HTTPS before real users\"\n    from_port   = 80\n    to_port     = 80\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n  }\n  egress {\n    from_port   = 8000\n    to_port     = 8000\n    protocol    = \"tcp\"\n    cidr_blocks = [aws_vpc.main.cidr_block]\n  }\n}\nresource \"aws_security_group\" \"app\" {\n  name_prefix = \"${var.project_name}-app-\"\n  vpc_id      = aws_vpc.main.id\n  ingress {\n    from_port       = 8000\n    to_port         = 8000\n    protocol        = \"tcp\"\n    security_groups = [aws_security_group.alb.id]\n  }\n  egress {\n    from_port   = 0\n    to_port     = 0\n    protocol    = \"-1\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n  }\n}\nresource \"aws_security_group\" \"data\" {\n  name_prefix = \"${var.project_name}-data-\"\n  vpc_id      = aws_vpc.main.id\n  dynamic \"ingress\" {\n    for_each = toset([5432, 6379])\n    content {\n      from_port       = ingress.value\n      to_port         = ingress.value\n      protocol        = \"tcp\"\n      security_groups = [aws_security_group.app.id]\n    }\n  }\n}\n",
+      "language": "hcl",
+      "description": "The complete two-AZ network and security-group path.",
+      "walkthrough": [
+        {
+          "title": "aws_vpc.main",
+          "explanation": "Creates an isolated address space. Referencing its ID makes dependent network resources wait for the VPC."
+        },
+        {
+          "title": "aws_internet_gateway.main",
+          "explanation": "Connects a public route table to the internet. Attaching it does not expose private tasks by itself."
+        },
+        {
+          "title": "aws_subnet.public",
+          "explanation": "Slices the VPC CIDR and places each subnet into one AZ. count.index selects a distinct subnet and zone."
+        },
+        {
+          "title": "aws_subnet.private",
+          "explanation": "Slices the VPC CIDR and places each subnet into one AZ. count.index selects a distinct subnet and zone."
+        },
+        {
+          "title": "aws_eip.nat",
+          "explanation": "Allocates the public IPv4 address used by NAT; it can incur charges independently of running application tasks."
+        },
+        {
+          "title": "aws_nat_gateway.main",
+          "explanation": "Enables outbound IPv4 traffic from private subnets. This lab uses one gateway, with an AZ/cost tradeoff."
+        },
+        {
+          "title": "aws_route_table.public",
+          "explanation": "Defines the default next hop. The public table uses the internet gateway; the private table uses NAT."
+        },
+        {
+          "title": "aws_route_table.private",
+          "explanation": "Defines the default next hop. The public table uses the internet gateway; the private table uses NAT."
+        },
+        {
+          "title": "aws_route_table_association.public",
+          "explanation": "Actually connects a subnet to its route table. A correct unassociated table would have no effect."
+        },
+        {
+          "title": "aws_route_table_association.private",
+          "explanation": "Actually connects a subnet to its route table. A correct unassociated table would have no effect."
+        },
+        {
+          "title": "aws_security_group.alb",
+          "explanation": "Defines stateful allowed connections. alb accepts public HTTP, app accepts 8000 from alb, and data accepts DB/cache ports only from app."
+        },
+        {
+          "title": "aws_security_group.app",
+          "explanation": "Defines stateful allowed connections. alb accepts public HTTP, app accepts 8000 from alb, and data accepts DB/cache ports only from app."
+        },
+        {
+          "title": "aws_security_group.data",
+          "explanation": "Defines stateful allowed connections. alb accepts public HTTP, app accepts 8000 from alb, and data accepts DB/cache ports only from app."
+        }
+      ]
+    },
+    {
+      "filename": "infra/02-data.tf",
+      "code": "resource \"aws_db_subnet_group\" \"main\" {\n  name       = \"${var.project_name}-db\"\n  subnet_ids = aws_subnet.private[*].id\n}\nresource \"aws_db_instance\" \"postgres\" {\n  identifier                  = \"${var.project_name}-postgres\"\n  engine                      = \"postgres\"\n  engine_version              = \"17\"\n  instance_class              = \"db.t4g.micro\"\n  allocated_storage           = 20\n  storage_encrypted           = true\n  db_name                     = \"appdb\"\n  username                    = \"appuser\"\n  manage_master_user_password = true\n  db_subnet_group_name        = aws_db_subnet_group.main.name\n  vpc_security_group_ids      = [aws_security_group.data.id]\n  publicly_accessible         = false\n  backup_retention_period     = 1\n  # Disposable lab only: take a final snapshot for data you need to keep.\n  skip_final_snapshot = true\n  deletion_protection = false\n}\nresource \"aws_elasticache_subnet_group\" \"main\" {\n  name       = \"${var.project_name}-cache\"\n  subnet_ids = aws_subnet.private[*].id\n}\nresource \"aws_elasticache_replication_group\" \"queue\" {\n  replication_group_id       = \"${var.project_name}-queue\"\n  description                = \"Private TaskIQ stream broker for the lab\"\n  engine                     = \"valkey\"\n  engine_version             = \"7.2\"\n  node_type                  = \"cache.t4g.micro\"\n  num_cache_clusters         = 1\n  automatic_failover_enabled = false\n  subnet_group_name          = aws_elasticache_subnet_group.main.name\n  security_group_ids         = [aws_security_group.data.id]\n  at_rest_encryption_enabled = true\n  transit_encryption_enabled = true\n}\n# RDS generates the password in Secrets Manager; Terraform reads only its ARN.\n# This lab uses the DB owner for brevity. Real apps need a restricted SQL role.\n# The single cache node has no failover. Add replicas and ACL/auth for production.\n",
+      "language": "hcl",
+      "description": "Private PostgreSQL with a managed password and a TLS Valkey endpoint.",
+      "walkthrough": [
+        {
+          "title": "aws_db_subnet_group.main",
+          "explanation": "Supplies private subnets across AZs where RDS is permitted to create database network interfaces."
+        },
+        {
+          "title": "aws_db_instance.postgres",
+          "explanation": "Creates PostgreSQL 17 with encryption and no public address. RDS generates its password in Secrets Manager; Terraform retains a reference to the secret, not its generated value."
+        },
+        {
+          "title": "aws_elasticache_subnet_group.main",
+          "explanation": "Constrains cache placement to private subnets."
+        },
+        {
+          "title": "aws_elasticache_replication_group.queue",
+          "explanation": "Creates the Redis-compatible Valkey endpoint. TLS and at-rest encryption are enabled; one node deliberately omits failover for this lab."
+        }
+      ]
+    },
+    {
+      "filename": "infra/03-iam.tf",
+      "code": "data \"aws_iam_policy_document\" \"ecs_trust\" {\n  statement {\n    actions = [\"sts:AssumeRole\"]\n    principals {\n      type        = \"Service\"\n      identifiers = [\"ecs-tasks.amazonaws.com\"]\n    }\n  }\n}\nresource \"aws_iam_role\" \"execution\" {\n  name               = \"${var.project_name}-execution\"\n  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json\n}\nresource \"aws_iam_role_policy_attachment\" \"execution\" {\n  role       = aws_iam_role.execution.name\n  policy_arn = \"arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy\"\n}\nresource \"aws_iam_role_policy\" \"db_secret\" {\n  role = aws_iam_role.execution.id\n  policy = jsonencode({\n    Version = \"2012-10-17\"\n    Statement = [{\n      Effect   = \"Allow\"\n      Action   = [\"secretsmanager:GetSecretValue\"]\n      Resource = aws_db_instance.postgres.master_user_secret[0].secret_arn\n    }]\n  })\n}\nresource \"aws_iam_role\" \"task\" {\n  name               = \"${var.project_name}-task\"\n  assume_role_policy = data.aws_iam_policy_document.ecs_trust.json\n}\nresource \"aws_iam_role_policy\" \"exec\" {\n  role = aws_iam_role.task.id\n  policy = jsonencode({\n    Version = \"2012-10-17\"\n    Statement = [{\n      Effect = \"Allow\"\n      Action = [\n        \"ssmmessages:CreateControlChannel\", \"ssmmessages:CreateDataChannel\",\n        \"ssmmessages:OpenControlChannel\", \"ssmmessages:OpenDataChannel\"\n      ]\n      Resource = \"*\"\n    }]\n  })\n}\n",
+      "language": "hcl",
+      "description": "Trust and permissions for ECS execution and task identities.",
+      "walkthrough": [
+        {
+          "title": "aws_iam_role.execution",
+          "explanation": "Defines an identity and its trust policy: who may assume it. Permissions come from attached policies, not from the role name."
+        },
+        {
+          "title": "aws_iam_role_policy_attachment.execution",
+          "explanation": "Attaches a managed policy to an identity. Execution and host policies grant different service permissions."
+        },
+        {
+          "title": "aws_iam_role_policy.db_secret",
+          "explanation": "Adds scoped inline permissions. Secret retrieval belongs to the execution role; ECS Exec channel access belongs to the task role."
+        },
+        {
+          "title": "aws_iam_role.task",
+          "explanation": "Defines an identity and its trust policy: who may assume it. Permissions come from attached policies, not from the role name."
+        },
+        {
+          "title": "aws_iam_role_policy.exec",
+          "explanation": "Adds scoped inline permissions. Secret retrieval belongs to the execution role; ECS Exec channel access belongs to the task role."
+        }
+      ]
+    },
+    {
+      "filename": "infra/04-ecs.tf",
+      "code": "resource \"aws_ecr_repository\" \"app\" {\n  name                 = \"${var.project_name}-app\"\n  image_tag_mutability = \"IMMUTABLE\"\n  # Disposable lab only: permit teardown after pushing images.\n  force_delete = true\n  image_scanning_configuration {\n    scan_on_push = true\n  }\n}\nresource \"aws_cloudwatch_log_group\" \"app\" {\n  name              = \"/ecs/${var.project_name}\"\n  retention_in_days = 7\n}\nresource \"aws_ecs_cluster\" \"main\" {\n  name = \"${var.project_name}-cluster\"\n}\nresource \"aws_lb\" \"main\" {\n  name               = \"${var.project_name}-alb\"\n  load_balancer_type = \"application\"\n  subnets            = aws_subnet.public[*].id\n  security_groups    = [aws_security_group.alb.id]\n}\nresource \"aws_lb_target_group\" \"api\" {\n  name                 = \"${var.project_name}-api\"\n  vpc_id               = aws_vpc.main.id\n  target_type          = \"ip\"\n  port                 = 8000\n  protocol             = \"HTTP\"\n  deregistration_delay = 30\n  health_check {\n    path    = \"/ready\"\n    matcher = \"200\"\n  }\n}\nresource \"aws_lb_listener\" \"http\" {\n  load_balancer_arn = aws_lb.main.arn\n  port              = 80\n  protocol          = \"HTTP\"\n  default_action {\n    type             = \"forward\"\n    target_group_arn = aws_lb_target_group.api.arn\n  }\n}\n\nlocals {\n  environment = [\n    { name = \"DB_HOST\", value = aws_db_instance.postgres.address },\n    { name = \"DB_PORT\", value = \"5432\" },\n    { name = \"DB_NAME\", value = \"appdb\" },\n    { name = \"DB_USER\", value = \"appuser\" },\n    { name = \"DB_SSLMODE\", value = \"require\" },\n    { name = \"REDIS_URL\", value = \"rediss://${aws_elasticache_replication_group.queue.primary_endpoint_address}:6379/0\" }\n  ]\n  secrets = [{\n    name      = \"DB_PASSWORD\"\n    valueFrom = \"${aws_db_instance.postgres.master_user_secret[0].secret_arn}:password::\"\n  }]\n  roles = {\n    api    = [\"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]\n    worker = [\"taskiq\", \"worker\", \"app.tasks:broker\"]\n  }\n}\nresource \"aws_ecs_task_definition\" \"app\" {\n  for_each                 = local.roles\n  family                   = \"${var.project_name}-${each.key}\"\n  network_mode             = \"awsvpc\"\n  requires_compatibilities = [\"FARGATE\"]\n  cpu                      = \"256\"\n  memory                   = \"512\"\n  execution_role_arn       = aws_iam_role.execution.arn\n  task_role_arn            = aws_iam_role.task.arn\n  runtime_platform {\n    cpu_architecture        = \"X86_64\"\n    operating_system_family = \"LINUX\"\n  }\n  container_definitions = jsonencode([{\n    name         = each.key\n    image        = \"${aws_ecr_repository.app.repository_url}:${var.image_tag}\"\n    essential    = true\n    command      = each.value\n    environment  = local.environment\n    secrets      = local.secrets\n    portMappings = each.key == \"api\" ? [{ containerPort = 8000, protocol = \"tcp\" }] : []\n    logConfiguration = {\n      logDriver = \"awslogs\"\n      options = {\n        awslogs-group         = aws_cloudwatch_log_group.app.name\n        awslogs-region        = var.aws_region\n        awslogs-stream-prefix = each.key\n      }\n    }\n  }])\n}\nresource \"aws_ecs_service\" \"api\" {\n  count                             = var.enable_services ? 1 : 0\n  name                              = \"${var.project_name}-api\"\n  cluster                           = aws_ecs_cluster.main.id\n  task_definition                   = aws_ecs_task_definition.app[\"api\"].arn\n  desired_count                     = 2\n  launch_type                       = \"FARGATE\"\n  enable_execute_command            = true\n  health_check_grace_period_seconds = 60\n  network_configuration {\n    subnets          = aws_subnet.private[*].id\n    security_groups  = [aws_security_group.app.id]\n    assign_public_ip = false\n  }\n  load_balancer {\n    target_group_arn = aws_lb_target_group.api.arn\n    container_name   = \"api\"\n    container_port   = 8000\n  }\n  deployment_circuit_breaker {\n    enable   = true\n    rollback = true\n  }\n  lifecycle {\n    ignore_changes = [desired_count]\n  }\n  depends_on = [\n    aws_lb_listener.http, aws_iam_role_policy.db_secret,\n    aws_iam_role_policy_attachment.execution, aws_route_table_association.private\n  ]\n}\nresource \"aws_ecs_service\" \"worker\" {\n  count                  = var.enable_services && !var.worker_on_ec2 ? 1 : 0\n  name                   = \"${var.project_name}-worker\"\n  cluster                = aws_ecs_cluster.main.id\n  task_definition        = aws_ecs_task_definition.app[\"worker\"].arn\n  desired_count          = 1\n  launch_type            = \"FARGATE\"\n  enable_execute_command = true\n  network_configuration {\n    subnets          = aws_subnet.private[*].id\n    security_groups  = [aws_security_group.app.id]\n    assign_public_ip = false\n  }\n  deployment_circuit_breaker {\n    enable   = true\n    rollback = true\n  }\n  depends_on = [\n    aws_iam_role_policy.db_secret, aws_iam_role_policy_attachment.execution,\n    aws_route_table_association.private\n  ]\n}\n",
+      "language": "hcl",
+      "description": "ECR, logs, cluster, ALB, shared container settings, task definitions and gated services.",
+      "walkthrough": [
+        {
+          "title": "aws_ecr_repository.app",
+          "explanation": "Stores release images. Immutable tags prevent accidentally overwriting a commit’s published image. force_delete is a destructive lab teardown choice."
+        },
+        {
+          "title": "aws_cloudwatch_log_group.app",
+          "explanation": "Creates a destination and retention period for container logs. A named log group does not itself create logs; the task definition must use awslogs."
+        },
+        {
+          "title": "aws_ecs_cluster.main",
+          "explanation": "Creates the scheduling/control-plane grouping. A cluster alone does not start a container or create an EC2 host."
+        },
+        {
+          "title": "aws_lb.main",
+          "explanation": "Creates the public application load balancer in the public subnet pair."
+        },
+        {
+          "title": "aws_lb_target_group.api",
+          "explanation": "Defines IP targets on port 8000 and /ready health checks. ECS registers and deregisters task IPs as deployments change."
+        },
+        {
+          "title": "aws_lb_listener.http",
+          "explanation": "Accepts HTTP on port 80 and forwards to the API target group. Production TLS needs a separate HTTPS listener and ACM certificate."
+        },
+        {
+          "title": "aws_ecs_task_definition.app",
+          "explanation": "Registers launch configuration: shared image tag, command, environment, secret references, roles, resources and logs. for_each creates API and worker families from one definition pattern."
+        },
+        {
+          "title": "aws_ecs_service.api",
+          "explanation": "Maintains running replicas from a task-definition revision. enable_services gates creation until the image and schema exist. Only the API attaches to ALB."
+        },
+        {
+          "title": "aws_ecs_service.worker",
+          "explanation": "Maintains running replicas from a task-definition revision. enable_services gates creation until the image and schema exist. Only the API attaches to ALB."
+        }
+      ]
+    },
+    {
+      "filename": "infra/05-scaling.tf",
+      "code": "resource \"aws_appautoscaling_target\" \"api\" {\n  count              = var.enable_services ? 1 : 0\n  min_capacity       = 2\n  max_capacity       = 8\n  resource_id        = \"service/${aws_ecs_cluster.main.name}/${aws_ecs_service.api[0].name}\"\n  scalable_dimension = \"ecs:service:DesiredCount\"\n  service_namespace  = \"ecs\"\n}\nresource \"aws_appautoscaling_policy\" \"api_cpu\" {\n  count              = var.enable_services ? 1 : 0\n  name               = \"${var.project_name}-api-cpu\"\n  policy_type        = \"TargetTrackingScaling\"\n  resource_id        = aws_appautoscaling_target.api[0].resource_id\n  scalable_dimension = aws_appautoscaling_target.api[0].scalable_dimension\n  service_namespace  = aws_appautoscaling_target.api[0].service_namespace\n  target_tracking_scaling_policy_configuration {\n    target_value       = 60\n    scale_out_cooldown = 60\n    scale_in_cooldown  = 300\n    predefined_metric_specification {\n      predefined_metric_type = \"ECSServiceAverageCPUUtilization\"\n    }\n  }\n}\n",
+      "language": "hcl",
+      "description": "API service autoscaling with Terraform desired_count ownership handled explicitly.",
+      "walkthrough": [
+        {
+          "title": "aws_appautoscaling_target.api",
+          "explanation": "Registers service desired count with bounds. The API resource ID uses the actual cluster and service names."
+        },
+        {
+          "title": "aws_appautoscaling_policy.api_cpu",
+          "explanation": "Adds CPU target tracking and asymmetric cooldowns. It does not add queue-backlog scaling or guarantee a response time."
+        }
+      ]
+    },
+    {
+      "filename": "infra/06-ec2.tf",
+      "code": "data \"aws_ssm_parameter\" \"ecs_ami\" {\n  name = \"/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id\"\n}\nresource \"aws_iam_role\" \"host\" {\n  name = \"${var.project_name}-host\"\n  assume_role_policy = jsonencode({\n    Version = \"2012-10-17\"\n    Statement = [{\n      Effect    = \"Allow\", Action = \"sts:AssumeRole\",\n      Principal = { Service = \"ec2.amazonaws.com\" }\n    }]\n  })\n}\nresource \"aws_iam_role_policy_attachment\" \"host\" {\n  for_each = toset([\n    \"arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role\",\n    \"arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore\"\n  ])\n  role       = aws_iam_role.host.name\n  policy_arn = each.value\n}\nresource \"aws_iam_instance_profile\" \"host\" {\n  role = aws_iam_role.host.name\n}\nresource \"aws_launch_template\" \"host\" {\n  image_id               = data.aws_ssm_parameter.ecs_ami.value\n  instance_type          = \"t3.small\"\n  vpc_security_group_ids = [aws_security_group.app.id]\n  iam_instance_profile {\n    arn = aws_iam_instance_profile.host.arn\n  }\n  metadata_options {\n    http_tokens = \"required\"\n  }\n  user_data = base64encode(<<-USERDATA\n    #!/bin/bash\n    echo ECS_CLUSTER=${aws_ecs_cluster.main.name} >> /etc/ecs/ecs.config\n    echo ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true >> /etc/ecs/ecs.config\n  USERDATA\n  )\n}\nresource \"aws_autoscaling_group\" \"host\" {\n  name                = \"${var.project_name}-hosts\"\n  min_size            = var.worker_on_ec2 ? 1 : 0\n  max_size            = var.worker_on_ec2 ? 4 : 0\n  desired_capacity    = var.worker_on_ec2 ? 1 : 0\n  vpc_zone_identifier = aws_subnet.private[*].id\n  launch_template {\n    id      = aws_launch_template.host.id\n    version = aws_launch_template.host.latest_version\n  }\n  tag {\n    key                 = \"AmazonECSManaged\"\n    value               = \"true\"\n    propagate_at_launch = true\n  }\n  lifecycle {\n    ignore_changes = [desired_capacity]\n  }\n  depends_on = [aws_iam_role_policy_attachment.host, aws_route_table_association.private]\n}\nresource \"aws_ecs_capacity_provider\" \"ec2\" {\n  name = \"${var.project_name}-ec2\"\n  auto_scaling_group_provider {\n    auto_scaling_group_arn = aws_autoscaling_group.host.arn\n    managed_scaling {\n      status          = \"ENABLED\"\n      target_capacity = 80\n    }\n  }\n}\nresource \"aws_ecs_cluster_capacity_providers\" \"main\" {\n  cluster_name       = aws_ecs_cluster.main.name\n  capacity_providers = [\"FARGATE\", aws_ecs_capacity_provider.ec2.name]\n}\nresource \"aws_ecs_task_definition\" \"worker_ec2\" {\n  family                   = \"${var.project_name}-worker-ec2\"\n  network_mode             = \"bridge\"\n  requires_compatibilities = [\"EC2\"]\n  cpu                      = \"256\"\n  memory                   = \"512\"\n  execution_role_arn       = aws_iam_role.execution.arn\n  task_role_arn            = aws_iam_role.task.arn\n  # Same application and secrets; only the launch compatibility differs.\n  container_definitions = aws_ecs_task_definition.app[\"worker\"].container_definitions\n}\nresource \"aws_ecs_service\" \"worker_ec2\" {\n  count                  = var.enable_services && var.worker_on_ec2 ? 1 : 0\n  name                   = \"${var.project_name}-worker-ec2\"\n  cluster                = aws_ecs_cluster.main.id\n  task_definition        = aws_ecs_task_definition.worker_ec2.arn\n  desired_count          = 1\n  enable_execute_command = true\n  capacity_provider_strategy {\n    capacity_provider = aws_ecs_capacity_provider.ec2.name\n    weight            = 1\n  }\n  depends_on = [aws_ecs_cluster_capacity_providers.main, aws_iam_role_policy.db_secret]\n}\n",
+      "language": "hcl",
+      "description": "Optional EC2 worker capacity. The default creates no running EC2 hosts.",
+      "walkthrough": [
+        {
+          "title": "aws_iam_role.host",
+          "explanation": "Defines an identity and its trust policy: who may assume it. Permissions come from attached policies, not from the role name."
+        },
+        {
+          "title": "aws_iam_role_policy_attachment.host",
+          "explanation": "Attaches a managed policy to an identity. Execution and host policies grant different service permissions."
+        },
+        {
+          "title": "aws_iam_instance_profile.host",
+          "explanation": "Associates a host IAM role with EC2. This is not the application task role."
+        },
+        {
+          "title": "aws_launch_template.host",
+          "explanation": "Defines the host AMI, machine size, instance profile, IMDSv2 setting and cluster-registration user data."
+        },
+        {
+          "title": "aws_autoscaling_group.host",
+          "explanation": "Supplies EC2 hosts in private subnets. worker_on_ec2=false gives a zero-host lab baseline; managed scaling may later change desired_capacity."
+        },
+        {
+          "title": "aws_ecs_capacity_provider.ec2",
+          "explanation": "Connects ECS task demand to an ASG. target_capacity=80 is a reservation target, not a guaranteed memory percentage."
+        },
+        {
+          "title": "aws_ecs_cluster_capacity_providers.main",
+          "explanation": "Registers Fargate and the optional EC2 provider with this cluster before EC2 services use it."
+        },
+        {
+          "title": "aws_ecs_task_definition.worker_ec2",
+          "explanation": "Registers launch configuration: shared image tag, command, environment, secret references, roles, resources and logs. for_each creates API and worker families from one definition pattern."
+        },
+        {
+          "title": "aws_ecs_service.worker_ec2",
+          "explanation": "Maintains running replicas from a task-definition revision. enable_services gates creation until the image and schema exist. Only the API attaches to ALB."
+        }
+      ]
+    },
+    {
+      "filename": "infra/outputs.tf",
+      "code": "output \"ecr_url\" {\n  value = aws_ecr_repository.app.repository_url\n}\noutput \"cluster_name\" {\n  value = aws_ecs_cluster.main.name\n}\noutput \"alb_url\" {\n  value = \"http://${aws_lb.main.dns_name}\"\n}\noutput \"migration_task_definition\" {\n  value = aws_ecs_task_definition.app[\"api\"].arn\n}\noutput \"migration_network\" {\n  value = jsonencode({\n    awsvpcConfiguration = {\n      subnets        = aws_subnet.private[*].id\n      securityGroups = [aws_security_group.app.id]\n      assignPublicIp = \"DISABLED\"\n    }\n  })\n}\n",
+      "language": "hcl",
+      "description": "Non-secret outputs used by the deployment commands.",
+      "walkthrough": [
+        {
+          "title": "-raw outputs",
+          "explanation": "These strings let shell commands use actual ARNs, network configuration and endpoints rather than copying IDs from screenshots."
+        }
+      ]
+    },
+    {
+      "filename": "infra/backend.tf.example",
+      "code": "# Rename to backend.tf ONLY after creating a separate state bucket.\n# Backend blocks cannot use var.*; use -backend-config for these settings.\nterraform {\n  backend \"s3\" {\n    key          = \"backend-bootcamp/terraform.tfstate\"\n    use_lockfile = true\n    encrypt      = true\n  }\n}\n",
+      "language": "hcl",
+      "description": "Optional S3 backend. The bucket must exist outside this module before activating this file.",
+      "walkthrough": [
+        {
+          "title": "use_lockfile",
+          "explanation": "Opt into S3-native locking. Bucket versioning supports recovery; backend IAM protects who can read state and acquire/delete the lock."
+        }
+      ]
+    }
+  ],
+  "svgDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 650\" role=\"img\" aria-label=\"AWS application architecture and trust boundaries\" class=\"course-diagram\"><title>AWS application architecture and trust boundaries</title><defs><marker id=\"graph-arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"130\" width=\"900\" height=\"380\" rx=\"14\" class=\"diagram-boundary\"/><text x=\"41\" y=\"155\" class=\"diagram-group\">PRIVATE SUBNETS · TWO AZs</text><path d=\"M215,63 L270,63\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"242\" y=\"45\" class=\"diagram-edge-label\" text-anchor=\"middle\">HTTP</text><path d=\"M395,101 L395,155 L165,155 L165,225\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"285\" y=\"145\" class=\"diagram-edge-label\" text-anchor=\"middle\">Forward :8000</text><path d=\"M275,263 L355,263\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"315\" y=\"247\" class=\"diagram-edge-label\" text-anchor=\"middle\">Enqueue</text><path d=\"M655,263 L575,263\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"615\" y=\"247\" class=\"diagram-edge-label\" text-anchor=\"middle\">Consume / ACK</text><path d=\"M165,301 L165,400\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"100\" y=\"355\" class=\"diagram-edge-label\" text-anchor=\"middle\">Read results</text><path d=\"M775,301 L775,350 L330,350 L330,438\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"490\" y=\"340\" class=\"diagram-edge-label\" text-anchor=\"middle\">Write result</text><path d=\"M765,101 L765,165 L775,165 L775,225\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"785\" y=\"145\" class=\"diagram-edge-label\" text-anchor=\"middle\">Pull image / emit logs</text><path d=\"M615,588 L555,588 L555,385 L245,385 L245,301\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"450\" y=\"420\" class=\"diagram-edge-label\" text-anchor=\"middle\">Inject at startup</text><rect x=\"25\" y=\"25\" width=\"190\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"120.0\" y=\"56\" text-anchor=\"middle\" class=\"diagram-title\">Client</text><text x=\"120.0\" y=\"78\" text-anchor=\"middle\" class=\"diagram-detail\">HTTP :80 in this lab</text><rect x=\"270\" y=\"25\" width=\"250\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"395.0\" y=\"56\" text-anchor=\"middle\" class=\"diagram-title\">Application Load Balancer</text><text x=\"395.0\" y=\"78\" text-anchor=\"middle\" class=\"diagram-detail\">Public subnets · two AZs</text><rect x=\"630\" y=\"25\" width=\"270\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"765.0\" y=\"56\" text-anchor=\"middle\" class=\"diagram-title\">ECR / CloudWatch</text><text x=\"765.0\" y=\"78\" text-anchor=\"middle\" class=\"diagram-detail\">Images and application logs</text><rect x=\"55\" y=\"225\" width=\"220\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"165.0\" y=\"256\" text-anchor=\"middle\" class=\"diagram-title\">FastAPI service</text><text x=\"165.0\" y=\"278\" text-anchor=\"middle\" class=\"diagram-detail\">Fargate · private IP :8000</text><rect x=\"355\" y=\"225\" width=\"220\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"465.0\" y=\"256\" text-anchor=\"middle\" class=\"diagram-title\">Valkey stream</text><text x=\"465.0\" y=\"278\" text-anchor=\"middle\" class=\"diagram-detail\">TLS :6379 · private endpoint</text><rect x=\"655\" y=\"225\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"775.0\" y=\"256\" text-anchor=\"middle\" class=\"diagram-title\">TaskIQ worker</text><text x=\"775.0\" y=\"278\" text-anchor=\"middle\" class=\"diagram-detail\">Fargate or optional EC2</text><rect x=\"70\" y=\"400\" width=\"260\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"200.0\" y=\"431\" text-anchor=\"middle\" class=\"diagram-title\">PostgreSQL 17</text><text x=\"200.0\" y=\"453\" text-anchor=\"middle\" class=\"diagram-detail\">TLS :5432 · private database</text><rect x=\"615\" y=\"550\" width=\"300\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"765.0\" y=\"581\" text-anchor=\"middle\" class=\"diagram-title\">Secrets Manager / IAM</text><text x=\"765.0\" y=\"603\" text-anchor=\"middle\" class=\"diagram-detail\">Startup secret · execution role</text></svg>",
+  "architectureDescription": "The lab’s public ALB forwards to private API tasks. API and workers share private PostgreSQL and TLS Valkey endpoints. ECR supplies one image, IAM controls startup/runtime access, and state records managed cloud objects.",
+  "flowDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Flow 8\" class=\"course-diagram\"><title>Flow 8</title><defs><marker id=\"arrow-Flow8\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Validate + plan</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Review foundation diff</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Apply foundations</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Services disabled</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Publish image</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Immutable SHA</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Update definitions</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Real image tag</text><rect x=\"300\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Run migration</text><text x=\"420\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Check exit code</text><rect x=\"25\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Enable + verify</text><text x=\"145\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">ALB → queue → DB</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow8)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow8)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow8)\"/><path d=\"M575,237 L540,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow8)\"/><path d=\"M300,237 L265,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow8)\"/></svg>",
+  "flowDescription": "Validate + plan → Apply foundations → Publish image → Update definitions → Run migration → Enable + verify.",
+  "breakItDrill": {
+    "title": "Detect managed drift safely",
+    "scenario": "In the lab console, change the managed CloudWatch log retention from 7 to 14 days, then run terraform plan.",
+    "symptom": "The plan proposes restoring the configured retention. Unlike adding an SSH rule, this drill does not open public access.",
+    "fix": "Review and apply the reconciliation, or change HCL deliberately if the new retention is intended."
+  },
+  "assignment": {
+    "title": "Explain and deploy the stack",
+    "description": "For each Terraform file, describe the AWS objects it creates, the inputs it consumes and the outputs/references that create dependencies. Deploy the baseline and optionally move the worker to EC2. Include migration output and a completed job ID in your notes.",
+    "completionHint": "Verify the result yourself, then complete the chapter checklist."
+  },
+  "recallNote": {
+    "keyTakeaway": "Understand the plan and its dependency graph before applying it; state is the ledger of ownership.",
+    "bullets": [
+      "Copy the full file set; numeric names do not define execution order.",
+      "Persist image_tag and enable_services inputs across releases.",
+      "A generated password can stay in Secrets Manager without its plaintext entering state.",
+      "Review every replacement and destroy operation."
+    ]
+  },
+  "badgeTone": "indigo",
+  "sources": [
+    {
+      "label": "Terraform language fundamentals",
+      "url": "https://developer.hashicorp.com/terraform/language"
+    },
+    {
+      "label": "Resource dependencies",
+      "url": "https://developer.hashicorp.com/terraform/language/resources/behavior"
+    },
+    {
+      "label": "S3 backend and native locking",
+      "url": "https://developer.hashicorp.com/terraform/language/backend/s3"
+    },
+    {
+      "label": "AWS provider resource reference",
+      "url": "https://registry.terraform.io/providers/hashicorp/aws/latest/docs"
+    },
+    {
+      "label": "RDS managed master password",
+      "url": "https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/db_instance"
+    }
+  ],
+  "checklist": [
+    {
+      "id": "w7-c1",
+      "text": "Read resource blocks, references, expressions, variables and outputs."
+    },
+    {
+      "id": "w7-c2",
+      "text": "Explain state, dependency graphs, drift, replacement and provider lockfiles."
+    },
+    {
+      "id": "w7-c3",
+      "text": "Build the network, data, identity, container and scaling layers in the right order."
+    },
+    {
+      "id": "w7-c4",
+      "text": "Inspect a saved plan, deploy an immutable image, migrate, and verify the complete result."
+    }
+  ]
+}
