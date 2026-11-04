@@ -35,7 +35,7 @@
     {
       "title": "Deploy in dependency order",
       "body": [
-        "Create network/data/roles and an ECR repository. Push the image. Register task definitions. Run python -m app.migrate once using the API definition with a command override. Verify exit code 0, then start API and worker services.",
+        "Create network/data/roles and an ECR repository. Push the image. Register task definitions. Run alembic upgrade head once using the API definition with a command override. Verify exit code 0, then start API and worker services.",
         "Schema migrations are a deployment concern. A growing system needs backward-compatible changes so old and new tasks can overlap during rolling deployment."
       ],
       "bullets": []
@@ -51,7 +51,7 @@
   "handHoldingSteps": [
     "Create ECR bootcamp-manual-app with immutable tags and create log group /ecs/bootcamp-manual. Build and push the committed source with the commands below.",
     "Replace every placeholder in the task definition. Register the API revision. Make a worker definition from the same image: name worker, command taskiq worker app.tasks:broker, no portMappings, and a worker log stream prefix.",
-    "Create ECS cluster bootcamp-manual-cluster. Run the API task definition once with command python -m app.migrate in private subnets/app-sg, no public IP. Inspect its stopped reason and api container exit code before proceeding.",
+    "Create ECS cluster bootcamp-manual-cluster. Run the API task definition once with command alembic upgrade head in private subnets/app-sg, no public IP. Inspect its stopped reason and api container exit code before proceeding.",
     "Create an IP target group on 8000 with /ready, then a public ALB across both public subnets. Forward listener port 80 to the target group.",
     "Create an API Fargate service with two tasks and the ALB attachment; create a worker service with one task and no ALB. Set 60-second health-check grace and deployment circuit-breaker rollback.",
     "Test /enqueue using a JSON body through the ALB and wait for /jobs. Inspect logs for the same job ID rather than relying only on the service’s running count."

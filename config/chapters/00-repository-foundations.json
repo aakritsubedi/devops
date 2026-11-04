@@ -19,7 +19,7 @@
     {
       "title": "The tools and the baseline",
       "body": [
-        "This course uses Python 3.13 as a supported learning baseline, not as a claim about the newest Python release. The app uses FastAPI with Pydantic 2, async Psycopg 3, TaskIQ Streams, PostgreSQL 17, and Redis-compatible Valkey in AWS. Ruff handles linting/formatting, pytest checks behavior, and uv manages Python plus dependencies.",
+        "This course uses Python 3.13 as a supported learning baseline, not as a claim about the newest Python release. The app uses FastAPI with Pydantic 2, SQLAlchemy 2.0 async sessions over Psycopg 3, Alembic migrations, .env settings, TaskIQ Streams, PostgreSQL 17, and Redis-compatible Valkey in AWS. Ruff handles linting/formatting, pytest checks behavior, and uv manages Python plus dependencies.",
         "Use a dedicated learning AWS account for cloud exercises. NAT gateways, ALBs, databases and running containers incur charges. Local chapters need no AWS account."
       ],
       "bullets": []
@@ -102,7 +102,7 @@
     },
     {
       "command": "cp .env.example .env\ngit status --short\ngit check-ignore .env .venv/",
-      "explanation": "Create local settings and verify they are ignored. This .env is for processes running on your host; Compose supplies its own container settings.",
+      "explanation": "Copy the example once, edit DB_PASSWORD in .env before the first database startup, and verify Git ignores it. Host processes read .env through Pydantic Settings; Compose reads it for variable interpolation and supplies container hostnames. Do not overwrite an existing .env when repeating this chapter.",
       "expected": "Git reports .env and .venv/ as ignored."
     },
     {
@@ -130,7 +130,7 @@
     {
       "filename": "examples/python_basics.py",
       "language": "python",
-      "code": "\"\"\"Save as examples/python_basics.py; run with uv run python examples/python_basics.py.\"\"\"\n\ntype WordCounts = dict[str, int]\n\n\ndef count_words(text: str) -> WordCounts:\n    if not text.strip():\n        raise ValueError(\"Text must contain at least one word\")\n    counts: WordCounts = {}\n    for word in text.casefold().split():\n        counts[word] = counts.get(word, 0) + 1\n    return counts\n\n\nif __name__ == \"__main__\":\n    result = count_words(\"Hello uv hello\")\n    print(result)\n    repeated = [word for word, count in result.items() if count > 1]\n    print(repeated)\n    try:\n        count_words(\"\")\n    except ValueError as error:\n        print(f\"Invalid input: {error}\")\n",
+      "code": "\"\"\"Save as examples/python_basics.py.\n\nRun with uv run python examples/python_basics.py.\n\"\"\"\n\ntype WordCounts = dict[str, int]\n\n\ndef count_words(text: str) -> WordCounts:\n    if not text.strip():\n        raise ValueError(\"Text must contain at least one word\")\n    counts: WordCounts = {}\n    for word in text.casefold().split():\n        counts[word] = counts.get(word, 0) + 1\n    return counts\n\n\nif __name__ == \"__main__\":\n    result = count_words(\"Hello uv hello\")\n    print(result)\n    repeated = [word for word, count in result.items() if count > 1]\n    print(repeated)\n    try:\n        count_words(\"\")\n    except ValueError as error:\n        print(f\"Invalid input: {error}\")\n",
       "description": "A small executable exercise before the framework code. Create examples/ first, then save and run this file with uv run --locked python examples/python_basics.py. It prints word counts, repeated words, and a handled validation error.",
       "walkthrough": [
         {
@@ -153,7 +153,7 @@
     },
     {
       "filename": "pyproject.toml",
-      "code": "[project]\nname = \"backend-bootcamp\"\nversion = \"0.1.0\"\nrequires-python = \">=3.13,<3.14\"\ndependencies = [\n  \"fastapi>=0.115,<1\",\n  \"uvicorn[standard]>=0.34,<1\",\n  \"pydantic-settings>=2.7,<3\",\n  \"psycopg[binary,pool]>=3.2,<4\",\n  \"taskiq>=0.11,<1\",\n  \"taskiq-redis>=1.0,<2\",\n]\n\n[dependency-groups]\ndev = [\"ruff>=0.11,<1\", \"pytest>=8,<10\", \"httpx>=0.28,<1\"]\n\n[tool.ruff]\ntarget-version = \"py313\"\nline-length = 88\n\n[tool.ruff.lint]\nselect = [\"E\", \"F\", \"I\", \"UP\", \"B\", \"ASYNC\"]\n\n[tool.pytest.ini_options]\npythonpath = [\".\"]\ntestpaths = [\"tests\"]\n",
+      "code": "[project]\nname = \"backend-bootcamp\"\nversion = \"0.1.0\"\nrequires-python = \">=3.13,<3.14\"\ndependencies = [\n  \"fastapi>=0.115,<1\",\n  \"uvicorn[standard]>=0.34,<1\",\n  \"pydantic-settings>=2.7,<3\",\n  \"sqlalchemy[asyncio]>=2.0,<2.1\",\n  \"alembic>=1.15,<2\",\n  \"psycopg[binary]>=3.2,<4\",\n  \"taskiq>=0.11,<1\",\n  \"taskiq-redis>=1.0,<2\",\n]\n\n[dependency-groups]\ndev = [\"ruff>=0.11,<1\", \"pytest>=8,<10\", \"httpx>=0.28,<1\"]\n\n[tool.ruff]\ntarget-version = \"py313\"\nline-length = 88\n\n[tool.ruff.lint]\nselect = [\"E\", \"F\", \"I\", \"UP\", \"B\", \"ASYNC\"]\n\n[tool.pytest.ini_options]\npythonpath = [\".\"]\ntestpaths = [\"tests\"]\n",
       "language": "toml",
       "description": "The project manifest. Copy this before running uv lock.",
       "walkthrough": [
@@ -187,9 +187,9 @@
     },
     {
       "filename": ".env.example",
-      "code": "# Only for a host process using Compose's published data ports.\nREDIS_URL=redis://localhost:6379/0\nDB_HOST=localhost\nDB_PORT=5432\nDB_NAME=appdb\nDB_USER=appuser\nDB_PASSWORD=local-dev-only\nDB_SSLMODE=disable\n",
+      "code": "# Copy to .env at the project root; never commit .env.\n# Host connections; Compose overrides hosts with service names.\nREDIS_URL=redis://localhost:6379/0\nDB_HOST=localhost\nDB_PORT=5432\nDB_NAME=appdb\nDB_USER=appuser\n# Disposable local lab only. Replace before first database initialization.\nDB_PASSWORD=local-dev-only\nDB_SSLMODE=disable\n",
       "language": "plaintext",
-      "description": "These non-secret sample values describe host-side local connections. Copy to .env and never reuse this password in AWS.",
+      "description": "Commit this placeholder example; copy it to .env for local secrets. Both host settings and Compose read DB_PASSWORD from .env.",
       "walkthrough": []
     }
   ],

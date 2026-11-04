@@ -1,14 +1,16 @@
 {
   "week": 2,
-  "mode": "FastAPI · TaskIQ · uv",
-  "title": "Build a Modern Python API, Worker & Container",
-  "subtitle": "Use uv, typed requests, async database I/O, a stream queue, tests, and a reproducible non-root image.",
+  "mode": "FastAPI · SQLAlchemy · Alembic · TaskIQ · uv",
+  "title": "Build a Python API, Database Migrations, Worker & Container",
+  "subtitle": "Use typed requests, SQLAlchemy async sessions, Alembic migrations, .env secrets, a stream queue, tests, and a reproducible non-root image.",
   "phase": "Foundations",
   "analogy": "The API is the order counter, the stream is the order rail, the worker prepares the order, and PostgreSQL records the completed receipt. Returning 202 means the order was accepted, not served.",
   "objectives": [
     "Explain type hints, validation, async/await, modules, and context managers.",
     "Run the same application as an HTTP API and a background worker.",
-    "Trace a JSON request through the queue into PostgreSQL.",
+    "Persist and query jobs with SQLAlchemy models and isolated async sessions.",
+    "Apply, inspect, and evolve the schema with reviewed Alembic migrations.",
+    "Read required secrets from .env and override them with deployment environment variables.",
     "Test behavior and build an image from a real uv.lock."
   ],
   "prerequisites": [
@@ -32,10 +34,28 @@
       "bullets": []
     },
     {
-      "title": "Connections, transactions and migrations",
+      "title": "SQLAlchemy models, sessions and transactions",
       "body": [
-        "The API borrows a pooled connection using `async with`; the worker opens its own connection. Successful transaction contexts commit; failures roll back. Parameterized SQL prevents values from becoming SQL syntax.",
-        "Run the initial schema command before starting services. CREATE TABLE IF NOT EXISTS is only an initial migration, not an evolving schema strategy. For later changes adopt versioned migrations, for example Alembic with SQLAlchemy."
+        "`JobLog` maps a Python class to the job_logs table using SQLAlchemy 2.0 `Mapped` annotations and `mapped_column`. The engine manages a pool of physical connections; `async_sessionmaker` creates a separate unit of work for each request or job. Psycopg remains the PostgreSQL driver underneath SQLAlchemy.",
+        "`async with Session.begin()` commits a successful write and rolls back when an exception escapes. Read sessions close after the query. Never share an AsyncSession between concurrent tasks. SQLAlchemy binds values as parameters; the PostgreSQL insert with `on_conflict_do_nothing` preserves job-ID deduplication."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Alembic owns schema changes",
+      "body": [
+        "A model describes the desired schema; importing it does not alter a database. The supplied Alembic environment imports `Base.metadata` and connects with the same settings as the API and worker. `alembic upgrade head` applies pending revisions and records the current revision in alembic_version. Do not call `create_all` during API or worker startup.",
+        "Copy the supplied alembic.ini and migrations directory as-is; do not run `alembic init` over them. The initial revision creates job_logs. For the next change, edit a model, run `alembic revision --autogenerate`, inspect both upgrade and downgrade, format the new file, and commit it with the model. Autogeneration is a draft: renames and data backfills need human review.",
+        "Run migrations once per release before starting application services. A downgrade can discard data: the initial downgrade drops job_logs. Practice reversing only a new nullable column in a disposable lab. If you previously ran the raw CREATE TABLE lab, back up its data, compare every column/type/default/constraint to revision 0001, and stamp 0001 only if they match exactly. Otherwise write a reviewed reconciliation migration; do not stamp blindly or delete existing data."
+      ],
+      "bullets": []
+    },
+    {
+      "title": "Load secrets from .env",
+      "body": [
+        "Copy the Chapter 1 .env.example to .env at the backend project root and set DB_PASSWORD before running the application. `BaseSettings` reads that file automatically; you do not need to source it in the shell. Process environment variables take priority over .env, and non-secret fields have local defaults. DB_PASSWORD is required and has no fallback in Python or Compose.",
+        "`SecretStr` masks ordinary settings representations; `get_secret_value()` passes the password to the driver. `URL.create` handles reserved characters without hand-building a connection string. Do not print secrets or connection URLs. .env is plaintext local configuration, not encrypted storage; keep it out of Git and Docker images. AWS injects DB_PASSWORD from Secrets Manager later in the course.",
+        "Compose reads .env for `${DB_PASSWORD:?...}` interpolation and explicitly passes the value to PostgreSQL, API, worker and migration containers. Its environment block overrides hostnames to postgres/redis; host-side commands use localhost. Run commands from the project root and restart processes after changing settings because get_settings is cached. Existing PostgreSQL volumes retain their original password; changing .env alone does not rotate it."
       ],
       "bullets": []
     },
@@ -49,28 +69,31 @@
     }
   ],
   "handHoldingSteps": [
-    "Copy the app package, tests, Dockerfile and compose.yaml into the repository root using the exact paths shown. Keep pyproject.toml and uv.lock at that root, not inside app/.",
-    "Run Ruff and pytest before starting Docker. The HTTP unit tests mock the queue and do not need a running database.",
-    "Run `docker compose up --build -d`. Compose waits for healthy PostgreSQL and Redis, runs the migration, then starts API and worker from the same image.",
-    "Open http://localhost:8001/docs. POST a JSON prompt, keep its job_id, then GET /jobs after the simulated work finishes. Follow the worker logs to connect HTTP acceptance to database commit.",
-    "For host-side debugging, start only postgres/redis, copy .env.example to .env, run the migration and launch API and worker in separate terminals. Stop any existing container API/worker first so two workers do not consume the same lab stream unexpectedly."
+    "Copy the app package, tests, Alembic configuration and migrations directory, Dockerfile and compose.yaml into the backend repository root using the exact paths shown. Keep pyproject.toml and uv.lock at that root, not inside app/.",
+    "Use the .env created in Chapter 1, or copy .env.example once if it is missing. Set DB_PASSWORD before the first database startup. Run Ruff and pytest. HTTP tests mock the queue; settings tests use temporary files and neither needs a running database.",
+    "Run `docker compose up --build -d`. Compose waits for healthy PostgreSQL and Redis, runs `alembic upgrade head`, then starts API and worker from the same image. Inspect the revision with `docker compose run --rm migrate alembic current`.",
+    "Open http://localhost:8001/docs. POST a JSON prompt, keep its job_id, then GET /jobs after the simulated work finishes. Follow worker logs to connect HTTP acceptance to SQLAlchemy transaction commit.",
+    "For host-side debugging, stop the container API/worker, start only postgres/redis, run `uv run --locked alembic upgrade head`, and launch API and worker in separate terminals from the same root. Their settings read .env automatically.",
+    "Complete the nullable-column migration exercise against the disposable local database. Review generated upgrade/downgrade code, verify current/check, then commit the model and revision together."
   ],
   "concepts": [
-    "Lifespan: The startup/shutdown context owns connections; avoid resource creation during import.",
-    "Async I/O: await relinquishes the event loop while I/O waits; it does not remove latency or parallelize CPU-bound code.",
+    "Lifespan: The API owns engine disposal; TaskIQ worker shutdown disposes the engine in each worker process. Engine construction performs no network I/O.",
+    "Async sessions: Each request or job gets its own session; the engine pool reuses connections, not transactions. Never share a session across concurrent tasks.",
+    "Versioned schema: Alembic tracks ordered revisions; changing a model alone does not change tables.",
+    "Settings precedence: Process environment overrides .env, which overrides field defaults. Required secrets have no default.",
     "HTTP contract: 202 means queued, 422 means input validation failed, and 503 means the enqueue attempt failed.",
-    "Idempotent persistence: A primary-key conflict can prevent duplicate writes for one job ID; it does not create a distributed exactly-once system."
+    "Idempotent persistence: A primary-key conflict prevents duplicate writes for one job ID; it does not create distributed exactly-once delivery."
   ],
   "commands": [
     {
       "command": "uv sync --locked\nuv run --locked ruff check .\nuv run --locked ruff format --check .\nuv run --locked pytest",
-      "explanation": "Install from the lockfile and run the quality gate. During development use uv run ruff format . to apply formatting.",
-      "expected": "Four HTTP tests pass; lint and format checks exit successfully."
+      "explanation": "With .env configured and the Chapter 1 lockfile updated, install dependencies and run quality checks. Use uv run ruff format . during development.",
+      "expected": "Seven tests pass (four HTTP, three settings); lint and format checks exit successfully."
     },
     {
-      "command": "docker compose config --quiet\ndocker compose up --build -d\ndocker compose ps -a\ndocker compose logs --tail=50 migrate worker api",
-      "explanation": "Validate Compose, build once per service cache, start, and inspect health/migration output.",
-      "expected": "Migration exits 0; API, worker, database and Redis remain running."
+      "command": "docker compose config --quiet\ndocker compose up --build -d\ndocker compose ps -a\ndocker compose logs --tail=50 migrate worker api\ndocker compose run --rm migrate alembic current",
+      "explanation": "Validate without displaying resolved secrets, start services, and inspect the Alembic revision. Avoid unredacted docker compose config output because it contains the interpolated password.",
+      "expected": "Migration exits 0 at revision 0001 (head); API, worker, database and Redis remain running."
     },
     {
       "command": "curl -i http://localhost:8001/health\ncurl -i http://localhost:8001/ready\ncurl -i -X POST http://localhost:8001/enqueue \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"prompt\":\"hello modern Python\"}'\nsleep 3\ncurl -s http://localhost:8001/jobs",
@@ -83,9 +106,14 @@
       "expected": "The same job ID appears in the database and completion log."
     },
     {
-      "command": "docker compose stop api worker\ndocker compose up -d postgres redis\nuv run --locked python -m app.migrate\nuv run --locked uvicorn app.main:app --reload --port 8001\n# In a second terminal, from the same root:\nuv run --locked taskiq worker app.tasks:broker",
-      "explanation": "Alternative host workflow using .env. --reload is for local development only.",
+      "command": "docker compose stop api worker\ndocker compose up -d postgres redis\nuv run --locked alembic upgrade head\nuv run --locked uvicorn app.main:app --reload --port 8001\n# In a second terminal, from the same root:\nuv run --locked taskiq worker app.tasks:broker",
+      "explanation": "Alternative host workflow: run from the root so Pydantic finds .env. The same Alembic revisions run locally and in containers. --reload is for development only.",
       "expected": "The API and worker use the same local database and queue as Compose."
+    },
+    {
+      "command": "# Host workflow: PostgreSQL is running; pause API/worker while practicing.\n# Add this nullable field inside JobLog in app/models.py:\n#     note: Mapped[str | None] = mapped_column(Text, nullable=True)\nuv run --locked alembic revision --autogenerate -m \"add job note\"\n# Open the new migrations/versions/*_add_job_note.py file.\n# Review: upgrade adds nullable note; downgrade drops only note.\nuv run --locked ruff check --fix migrations\nuv run --locked ruff format migrations\nuv run --locked alembic upgrade head\nuv run --locked alembic current\nuv run --locked alembic check\n# Optional disposable-lab rollback: permanently discards note values.\n# Keep the note model field during the downgrade/re-upgrade practice.\n# uv run --locked alembic downgrade -1\n# uv run --locked alembic upgrade head\n# Commit app/models.py plus the reviewed revision after checking the diff.",
+      "explanation": "Generate the next migration only after editing the model. Review it before upgrade; autogenerate cannot infer every change. current reports the applied revision; check detects remaining schema differences. Rebuild the Compose image after changing models or migrations before resuming container services.",
+      "expected": "A new revision follows 0001, adds a nullable note column, and alembic check reports no new upgrade operations. Existing jobs remain readable."
     },
     {
       "command": "docker compose down\n# Optional reset: permanently remove this local lab’s database and queue data.\ndocker compose down -v",
@@ -103,37 +131,61 @@
     },
     {
       "filename": "app/config.py",
-      "code": "from functools import lru_cache\n\nfrom psycopg.conninfo import make_conninfo\nfrom pydantic import SecretStr\nfrom pydantic_settings import BaseSettings, SettingsConfigDict\n\n\nclass Settings(BaseSettings):\n    model_config = SettingsConfigDict(env_file=\".env\", extra=\"ignore\")\n\n    redis_url: str = \"redis://localhost:6379/0\"\n    db_host: str = \"localhost\"\n    db_port: int = 5432\n    db_name: str = \"appdb\"\n    db_user: str = \"appuser\"\n    db_password: SecretStr = SecretStr(\"local-dev-only\")\n    db_sslmode: str = \"disable\"  # Local only; AWS sets require.\n\n    @property\n    def conninfo(self) -> str:\n        # Quote special characters correctly; never log this string.\n        return make_conninfo(\n            host=self.db_host,\n            port=self.db_port,\n            dbname=self.db_name,\n            user=self.db_user,\n            password=self.db_password.get_secret_value(),\n            sslmode=self.db_sslmode,\n            connect_timeout=5,\n        )\n\n\n@lru_cache\ndef get_settings() -> Settings:\n    return Settings()\n",
+      "code": "from functools import lru_cache\n\nfrom pydantic import Field, SecretStr\nfrom pydantic_settings import BaseSettings, SettingsConfigDict\nfrom sqlalchemy import URL\n\n\nclass Settings(BaseSettings):\n    model_config = SettingsConfigDict(\n        env_file=\".env\",\n        env_file_encoding=\"utf-8\",\n        extra=\"ignore\",\n        hide_input_in_errors=True,\n    )\n\n    redis_url: str = \"redis://localhost:6379/0\"\n    db_host: str = \"localhost\"\n    db_port: int = 5432\n    db_name: str = \"appdb\"\n    db_user: str = \"appuser\"\n    db_password: SecretStr = Field(min_length=1)\n    db_sslmode: str = \"disable\"  # Local only; AWS sets require.\n\n    @property\n    def database_url(self) -> URL:\n        # Pass a URL object to the engine; never log its revealed password.\n        return URL.create(\n            \"postgresql+psycopg\",\n            host=self.db_host,\n            port=self.db_port,\n            database=self.db_name,\n            username=self.db_user,\n            password=self.db_password.get_secret_value(),\n            query={\"sslmode\": self.db_sslmode, \"connect_timeout\": \"5\"},\n        )\n\n\n@lru_cache\ndef get_settings() -> Settings:\n    return Settings()\n",
       "language": "python",
-      "description": "Typed, environment-driven settings shared by API and worker.",
+      "description": "Typed settings load local .env secrets or injected deployment environment variables.",
       "walkthrough": [
         {
-          "title": "Settings(BaseSettings)",
-          "explanation": "Fields provide types and local defaults. Environment variables override them; SecretStr redacts ordinary representations, but get_secret_value explicitly exposes the value to the database driver."
+          "title": "Required DB_PASSWORD",
+          "explanation": "Missing or empty passwords fail validation. SecretStr masks ordinary representations; explicit access still exposes the underlying value."
         },
         {
-          "title": "conninfo",
-          "explanation": "make_conninfo escapes connection fields correctly. This avoids breaking database passwords containing @, : or /. Never log the resulting string."
+          "title": "URL.create",
+          "explanation": "The URL object accepts passwords containing @, :, / or % without manually escaping strings. No password is stored in alembic.ini."
+        },
+        {
+          "title": "SettingsConfigDict",
+          "explanation": "Read .env relative to the working directory, with process environment taking priority. extra=ignore permits unrelated local settings; hide_input_in_errors reduces accidental value exposure in validation messages."
         },
         {
           "title": "@lru_cache",
-          "explanation": "Load settings once per process, rather than reading configuration for every request."
+          "explanation": "Read settings once per process. Restart after configuration changes; tests instantiate Settings directly to test precedence."
         }
       ]
     },
     {
       "filename": "app/db.py",
-      "code": "from psycopg.rows import dict_row\nfrom psycopg_pool import AsyncConnectionPool\n\nfrom app.config import get_settings\n\n# Each API process owns its own small pool; construction opens no sockets.\npool = AsyncConnectionPool(\n    conninfo=get_settings().conninfo,\n    min_size=1,\n    max_size=5,\n    open=False,\n    kwargs={\"row_factory\": dict_row},\n)\n",
+      "code": "from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine\n\nfrom app.config import get_settings\n\n# Each process owns this engine. Construction opens no database sockets.\nengine = create_async_engine(\n    get_settings().database_url,\n    pool_size=5,\n    max_overflow=0,\n    pool_pre_ping=True,\n)\nSession = async_sessionmaker(engine, expire_on_commit=False)\n",
       "language": "python",
-      "description": "A small asynchronous connection pool owned by each API process.",
+      "description": "A per-process async SQLAlchemy engine and a factory for isolated sessions.",
       "walkthrough": [
         {
-          "title": "open=False",
-          "explanation": "Importing the module performs no network I/O. FastAPI lifespan opens the pool and closes it on shutdown."
+          "title": "Engine versus session",
+          "explanation": "The engine pools connections; calling Session() creates a separate unit of work. API and worker processes never share connections or sessions."
         },
         {
-          "title": "max_size=5",
-          "explanation": "Two API processes can use up to ten pooled connections, before worker and migration connections. Scale with the database connection budget in mind."
+          "title": "pool_size=5, max_overflow=0",
+          "explanation": "At most five pooled connections per process; count every API and TaskIQ child process, migrations and admin sessions when budgeting database connections."
+        },
+        {
+          "title": "expire_on_commit=False",
+          "explanation": "Keep loaded values accessible after commit without triggering implicit asynchronous I/O. Close every session and dispose the engine at process shutdown."
+        }
+      ]
+    },
+    {
+      "filename": "app/models.py",
+      "code": "from datetime import datetime\nfrom uuid import UUID\n\nfrom sqlalchemy import DateTime, Integer, Text, Uuid, func\nfrom sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column\n\n\nclass Base(DeclarativeBase):\n    pass\n\n\nclass JobLog(Base):\n    __tablename__ = \"job_logs\"\n\n    job_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)\n    prompt: Mapped[str] = mapped_column(Text, nullable=False)\n    word_count: Mapped[int] = mapped_column(Integer, nullable=False)\n    created_at: Mapped[datetime] = mapped_column(\n        DateTime(timezone=True), server_default=func.now(), nullable=False\n    )\n",
+      "language": "python",
+      "description": "SQLAlchemy 2.0 mapping shared by runtime queries and Alembic metadata.",
+      "walkthrough": [
+        {
+          "title": "Base.metadata",
+          "explanation": "Collects the mapped schema so Alembic can compare it with the database. Importing a model does not create or modify tables."
+        },
+        {
+          "title": "Mapped and mapped_column",
+          "explanation": "Declare Python types and database columns. The job_id primary key supports deduplication; created_at is a timezone-aware, database-generated timestamp."
         }
       ]
     },
@@ -151,33 +203,33 @@
     },
     {
       "filename": "app/tasks.py",
-      "code": "import asyncio\nimport logging\nfrom uuid import UUID\n\nimport psycopg\n\nfrom app.broker import broker\nfrom app.config import get_settings\n\nlogger = logging.getLogger(__name__)\n\n\n@broker.task\nasync def process_ai_job(job_id: str, prompt: str) -> None:\n    \"\"\"A deterministic stand-in for slow external I/O, not an actual LLM call.\"\"\"\n    await asyncio.sleep(2)\n    word_count = len(prompt.split())\n    # The worker uses its own async connection, not the API's connection pool.\n    async with await psycopg.AsyncConnection.connect(get_settings().conninfo) as conn:\n        await conn.execute(\n            \"\"\"\n            INSERT INTO job_logs (job_id, prompt, word_count)\n            VALUES (%s, %s, %s)\n            ON CONFLICT (job_id) DO NOTHING\n            \"\"\",\n            (UUID(job_id), prompt, word_count),\n        )\n    # A successful context exit commits; exceptions cause rollback.\n    logger.info(\"job_completed job_id=%s word_count=%s\", job_id, word_count)\n",
+      "code": "import asyncio\nimport logging\nfrom uuid import UUID\n\nfrom sqlalchemy.dialects.postgresql import insert\nfrom taskiq import TaskiqEvents, TaskiqState\n\nfrom app.broker import broker\nfrom app.db import Session, engine\nfrom app.models import JobLog\n\nlogger = logging.getLogger(__name__)\n\n\n@broker.on_event(TaskiqEvents.WORKER_SHUTDOWN)\nasync def close_worker_database(state: TaskiqState) -> None:\n    await engine.dispose()\n\n\n@broker.task\nasync def process_ai_job(job_id: str, prompt: str) -> None:\n    \"\"\"A deterministic stand-in for slow external I/O, not an actual LLM call.\"\"\"\n    await asyncio.sleep(2)\n    word_count = len(prompt.split())\n    statement = (\n        insert(JobLog)\n        .values(job_id=UUID(job_id), prompt=prompt, word_count=word_count)\n        .on_conflict_do_nothing(index_elements=[JobLog.job_id])\n    )\n    # A fresh session and transaction for this job only.\n    async with Session.begin() as session:\n        await session.execute(statement)\n    # Success commits; an exception rolls back and closes the session.\n    logger.info(\"job_completed job_id=%s word_count=%s\", job_id, word_count)\n",
       "language": "python",
-      "description": "The background worker turns a prompt into a persisted word-count result.",
+      "description": "A background job persists its result through a SQLAlchemy transaction.",
       "walkthrough": [
         {
-          "title": "@broker.task",
-          "explanation": "Registers a Python coroutine as a remotely queued task. Importing app.tasks in the worker registers it with the same broker object."
+          "title": "Session.begin()",
+          "explanation": "Creates a new session, starts a transaction, commits on success or rolls back on failure, then closes the session."
         },
         {
-          "title": "await asyncio.sleep(2)",
-          "explanation": "Simulates waiting for slow I/O. It is not an LLM call and does not block the event loop like time.sleep would. Real external HTTP calls need an async client, timeouts and error handling."
+          "title": "PostgreSQL insert",
+          "explanation": "Bound values cannot become SQL syntax. ON CONFLICT makes repeated delivery of one job_id harmless for this write; separate HTTP submissions still create different IDs."
         },
         {
-          "title": "Parameterized SQL",
-          "explanation": "%s placeholders pass values separately from SQL. ON CONFLICT makes a repeated delivery of the same job_id harmless for this database write; it does not deduplicate two separate HTTP submissions."
+          "title": "WORKER_SHUTDOWN",
+          "explanation": "TaskIQ disposes the engine in each worker process. The API disposes its own engine in FastAPI lifespan."
         }
       ]
     },
     {
       "filename": "app/main.py",
-      "code": "from contextlib import asynccontextmanager\nfrom uuid import UUID, uuid4\n\nfrom fastapi import FastAPI, HTTPException\nfrom pydantic import BaseModel, Field\n\nfrom app.broker import broker\nfrom app.db import pool\nfrom app.tasks import process_ai_job\n\n\n@asynccontextmanager\nasync def lifespan(app: FastAPI):\n    await pool.open(wait=True)\n    try:\n        await broker.startup()\n        try:\n            yield\n        finally:\n            await broker.shutdown()\n    finally:\n        await pool.close()\n\n\napp = FastAPI(title=\"Backend Bootcamp\", lifespan=lifespan)\n\n\nclass JobRequest(BaseModel):\n    prompt: str = Field(min_length=1, max_length=2000)\n\n\nclass JobAccepted(BaseModel):\n    job_id: UUID\n    status: str = \"queued\"\n\n\n@app.get(\"/health\")\nasync def health() -> dict[str, str]:\n    # Liveness: the process can serve HTTP. No external dependency checks.\n    return {\"status\": \"ok\"}\n\n\n@app.get(\"/ready\")\nasync def ready() -> dict[str, str]:\n    async with pool.connection() as conn:\n        await conn.execute(\"SELECT 1\")\n    return {\"status\": \"ready\"}\n\n\n@app.post(\"/enqueue\", status_code=202, response_model=JobAccepted)\nasync def enqueue(payload: JobRequest) -> JobAccepted:\n    job_id = uuid4()\n    try:\n        await process_ai_job.kiq(str(job_id), payload.prompt)\n    except Exception as exc:\n        raise HTTPException(503, \"Queue unavailable; try again later\") from exc\n    return JobAccepted(job_id=job_id)\n\n\n@app.get(\"/jobs\")\nasync def list_jobs():\n    async with pool.connection() as conn:\n        cursor = await conn.execute(\n            \"SELECT job_id, prompt, word_count, created_at \"\n            \"FROM job_logs ORDER BY created_at DESC LIMIT 20\"\n        )\n        return {\"jobs\": await cursor.fetchall()}\n",
+      "code": "from contextlib import asynccontextmanager\nfrom uuid import UUID, uuid4\n\nfrom fastapi import FastAPI, HTTPException\nfrom pydantic import BaseModel, Field\nfrom sqlalchemy import select, text\n\nfrom app.broker import broker\nfrom app.db import Session, engine\nfrom app.models import JobLog\nfrom app.tasks import process_ai_job\n\n\n@asynccontextmanager\nasync def lifespan(app: FastAPI):\n    try:\n        async with engine.connect() as connection:\n            await connection.execute(text(\"SELECT 1\"))\n        await broker.startup()\n        try:\n            yield\n        finally:\n            await broker.shutdown()\n    finally:\n        await engine.dispose()\n\n\napp = FastAPI(title=\"Backend Bootcamp\", lifespan=lifespan)\n\n\nclass JobRequest(BaseModel):\n    prompt: str = Field(min_length=1, max_length=2000)\n\n\nclass JobAccepted(BaseModel):\n    job_id: UUID\n    status: str = \"queued\"\n\n\n@app.get(\"/health\")\nasync def health() -> dict[str, str]:\n    # Liveness: the process can serve HTTP. No external dependency checks.\n    return {\"status\": \"ok\"}\n\n\n@app.get(\"/ready\")\nasync def ready() -> dict[str, str]:\n    async with Session() as session:\n        await session.execute(text(\"SELECT 1\"))\n    return {\"status\": \"ready\"}\n\n\n@app.post(\"/enqueue\", status_code=202, response_model=JobAccepted)\nasync def enqueue(payload: JobRequest) -> JobAccepted:\n    job_id = uuid4()\n    try:\n        await process_ai_job.kiq(str(job_id), payload.prompt)\n    except Exception as exc:\n        raise HTTPException(503, \"Queue unavailable; try again later\") from exc\n    return JobAccepted(job_id=job_id)\n\n\n@app.get(\"/jobs\")\nasync def list_jobs():\n    async with Session() as session:\n        result = await session.execute(\n            select(JobLog).order_by(JobLog.created_at.desc()).limit(20)\n        )\n        return {\n            \"jobs\": [\n                {\n                    \"job_id\": row.job_id,\n                    \"prompt\": row.prompt,\n                    \"word_count\": row.word_count,\n                    \"created_at\": row.created_at,\n                }\n                for row in result.scalars()\n            ]\n        }\n",
       "language": "python",
       "description": "A typed HTTP API using lifespan instead of deprecated startup event decorators.",
       "walkthrough": [
         {
           "title": "lifespan",
-          "explanation": "Open the pool and broker before serving requests; release both on shutdown. The finally blocks also release the pool when broker startup fails."
+          "explanation": "Check the database and start the broker before serving requests; shut down the broker and dispose the engine on exit. The finally block also disposes the engine if startup fails."
         },
         {
           "title": "JobRequest and JobAccepted",
@@ -189,23 +241,57 @@
         },
         {
           "title": "/health, /ready, /jobs",
-          "explanation": "Liveness checks the HTTP process; readiness checks PostgreSQL. /jobs queries completed results with an async pooled connection. Readiness does not currently check queue connectivity."
+          "explanation": "Liveness checks the HTTP process; readiness checks PostgreSQL. /jobs selects mapped rows using a fresh async session and serializes the same response fields. Readiness does not currently check queue connectivity."
         }
       ]
     },
     {
-      "filename": "app/migrate.py",
-      "code": "\"\"\"One initial, repeatable lab migration; run before starting API or workers.\"\"\"\n\nimport asyncio\n\nimport psycopg\n\nfrom app.config import get_settings\n\n\nasync def main() -> None:\n    async with await psycopg.AsyncConnection.connect(get_settings().conninfo) as conn:\n        await conn.execute(\"\"\"\n            CREATE TABLE IF NOT EXISTS job_logs (\n                job_id UUID PRIMARY KEY,\n                prompt TEXT NOT NULL,\n                word_count INTEGER NOT NULL,\n                created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n            )\n        \"\"\")\n    print(\"Initial schema ready\")\n\n\nif __name__ == \"__main__\":\n    asyncio.run(main())\n",
+      "filename": "alembic.ini",
+      "code": "[alembic]\nscript_location = %(here)s/migrations\nprepend_sys_path = .\n# Connection credentials come from app.config, never this tracked file.\n",
+      "language": "plaintext",
+      "description": "Alembic configuration points to committed revisions without storing a database URL.",
+      "walkthrough": []
+    },
+    {
+      "filename": "migrations/env.py",
+      "code": "import asyncio\n\nfrom alembic import context\nfrom sqlalchemy import pool\nfrom sqlalchemy.ext.asyncio import create_async_engine\n\nfrom app.config import get_settings\nfrom app.models import Base\n\n# Importing app.models registers JobLog on this metadata.\ntarget_metadata = Base.metadata\n\n\ndef run_migrations_offline() -> None:\n    # PostgreSQL SQL generation needs no credentials or network connection.\n    context.configure(\n        dialect_name=\"postgresql\",\n        target_metadata=target_metadata,\n        literal_binds=True,\n        compare_type=True,\n    )\n    with context.begin_transaction():\n        context.run_migrations()\n\n\ndef do_run_migrations(connection) -> None:\n    context.configure(\n        connection=connection, target_metadata=target_metadata, compare_type=True\n    )\n    with context.begin_transaction():\n        context.run_migrations()\n\n\nasync def run_migrations_online() -> None:\n    engine = create_async_engine(get_settings().database_url, poolclass=pool.NullPool)\n    try:\n        async with engine.connect() as connection:\n            await connection.run_sync(do_run_migrations)\n    finally:\n        await engine.dispose()\n\n\nif context.is_offline_mode():\n    run_migrations_offline()\nelse:\n    asyncio.run(run_migrations_online())\n",
       "language": "python",
-      "description": "Run the initial SQL schema once as a separate deployment step.",
+      "description": "Alembic uses the same settings and metadata as the application.",
       "walkthrough": [
         {
-          "title": "CREATE TABLE IF NOT EXISTS",
-          "explanation": "This makes the initial lab setup repeatable. It does not migrate an existing table when columns change; versioned migrations are required as the app evolves."
+          "title": "run_sync",
+          "explanation": "Alembic operations use a synchronous connection interface adapted from the async driver. NullPool avoids retaining connections in this short-lived process."
         },
         {
-          "title": "asyncio.run",
-          "explanation": "A command-line entry point runs the coroutine and waits for it to finish before returning an exit code."
+          "title": "target_metadata",
+          "explanation": "Import all mapped model modules before comparing metadata. This is what lets --autogenerate detect model/schema differences."
+        },
+        {
+          "title": "No sqlalchemy.url",
+          "explanation": "Pass the URL object directly to the engine. This avoids exposing secrets in tracked configuration and avoids ConfigParser interpolation problems with percent characters in passwords."
+        }
+      ]
+    },
+    {
+      "filename": "migrations/script.py.mako",
+      "code": "\"\"\"${message}\n\nRevision ID: ${up_revision}\nRevises: ${down_revision | comma,n}\n\"\"\"\n\nfrom alembic import op\nimport sqlalchemy as sa\n${imports if imports else \"\"}\n\nrevision = ${repr(up_revision)}\ndown_revision = ${repr(down_revision)}\nbranch_labels = ${repr(branch_labels)}\ndepends_on = ${repr(depends_on)}\n\n\ndef upgrade() -> None:\n    ${upgrades if upgrades else \"pass\"}\n\n\ndef downgrade() -> None:\n    ${downgrades if downgrades else \"pass\"}\n",
+      "language": "plaintext",
+      "description": "Template required by alembic revision; review and format every generated migration.",
+      "walkthrough": []
+    },
+    {
+      "filename": "migrations/versions/0001_create_job_logs.py",
+      "code": "\"\"\"Create the completed-job table.\n\nRevision ID: 0001\nRevises: None\n\"\"\"\n\nimport sqlalchemy as sa\nfrom alembic import op\n\nrevision = \"0001\"\ndown_revision = None\nbranch_labels = None\ndepends_on = None\n\n\ndef upgrade() -> None:\n    op.create_table(\n        \"job_logs\",\n        sa.Column(\"job_id\", sa.Uuid(), nullable=False),\n        sa.Column(\"prompt\", sa.Text(), nullable=False),\n        sa.Column(\"word_count\", sa.Integer(), nullable=False),\n        sa.Column(\n            \"created_at\",\n            sa.DateTime(timezone=True),\n            server_default=sa.text(\"now()\"),\n            nullable=False,\n        ),\n        sa.PrimaryKeyConstraint(\"job_id\"),\n    )\n\n\ndef downgrade() -> None:\n    # Destructive: removes all completed jobs. Disposable lab use only.\n    op.drop_table(\"job_logs\")\n",
+      "language": "python",
+      "description": "Initial versioned migration: creates the table and records revision 0001.",
+      "walkthrough": [
+        {
+          "title": "revision / down_revision",
+          "explanation": "Form an ordered revision chain. Future migrations point to 0001 or their immediate predecessor."
+        },
+        {
+          "title": "upgrade / downgrade",
+          "explanation": "Use historical SQLAlchemy column definitions rather than importing today's model. The downgrade drops this table and its data, so do not use it as a routine production rollback."
         }
       ]
     },
@@ -226,8 +312,15 @@
       ]
     },
     {
+      "filename": "tests/test_settings.py",
+      "code": "import pytest\nfrom pydantic import ValidationError\n\nfrom app.config import Settings\n\n\n@pytest.fixture(autouse=True)\ndef clean_password_environment(monkeypatch):\n    monkeypatch.delenv(\"DB_PASSWORD\", raising=False)\n\n\ndef test_password_loads_from_env_file(tmp_path):\n    env_file = tmp_path / \".env\"\n    env_file.write_text(\"DB_PASSWORD=local@:/%secret\\n\", encoding=\"utf-8\")\n    settings = Settings(_env_file=env_file)\n    assert settings.db_password.get_secret_value() == \"local@:/%secret\"\n    assert settings.database_url.password == \"local@:/%secret\"\n    assert \"local@:/%secret\" not in repr(settings)\n\n\ndef test_process_environment_overrides_env_file(tmp_path, monkeypatch):\n    env_file = tmp_path / \".env\"\n    env_file.write_text(\"DB_PASSWORD=file-value\\n\", encoding=\"utf-8\")\n    monkeypatch.setenv(\"DB_PASSWORD\", \"environment-value\")\n    settings = Settings(_env_file=env_file)\n    assert settings.db_password.get_secret_value() == \"environment-value\"\n\n\ndef test_missing_password_fails_validation():\n    with pytest.raises(ValidationError, match=\"db_password\"):\n        Settings(_env_file=None)\n",
+      "language": "python",
+      "description": "Verify .env loading, special-character passwords, redaction, environment precedence and required-secret validation.",
+      "walkthrough": []
+    },
+    {
       "filename": "Dockerfile",
-      "code": "# syntax=docker/dockerfile:1\nFROM python:3.13-slim AS build\nCOPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /usr/local/bin/uv\nWORKDIR /workspace\nENV UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0\nCOPY pyproject.toml uv.lock ./\nRUN --mount=type=cache,target=/root/.cache/uv \\\n    uv sync --locked --no-dev --no-install-project\n\nFROM python:3.13-slim AS runtime\nRUN useradd --create-home --uid 10001 appuser\nWORKDIR /workspace\nENV PATH=\"/workspace/.venv/bin:$PATH\" \\\n    PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1\nCOPY --from=build /workspace/.venv ./.venv\nCOPY --chown=appuser:appuser app ./app\nUSER appuser\nEXPOSE 8000\nCMD [\"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]\n",
+      "code": "# syntax=docker/dockerfile:1\nFROM python:3.13-slim AS build\nCOPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /usr/local/bin/uv\nWORKDIR /workspace\nENV UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0\nCOPY pyproject.toml uv.lock ./\nRUN --mount=type=cache,target=/root/.cache/uv \\\n    uv sync --locked --no-dev --no-install-project\n\nFROM python:3.13-slim AS runtime\nRUN useradd --create-home --uid 10001 appuser\nWORKDIR /workspace\nENV PATH=\"/workspace/.venv/bin:$PATH\" \\\n    PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1\nCOPY --from=build /workspace/.venv ./.venv\nCOPY --chown=appuser:appuser app ./app\nCOPY --chown=appuser:appuser alembic.ini ./alembic.ini\nCOPY --chown=appuser:appuser migrations ./migrations\nUSER appuser\nEXPOSE 8000\nCMD [\"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]\n",
       "language": "docker",
       "description": "Build one locked runtime environment and run the final container as a non-root user.",
       "walkthrough": [
@@ -237,7 +330,7 @@
         },
         {
           "title": "Runtime stage",
-          "explanation": "Copy the virtual environment and app without uv or development tools. PATH resolves uvicorn/taskiq from that virtual environment."
+          "explanation": "Copy the virtual environment, app, alembic.ini and migrations directory without uv or development tools. PATH resolves uvicorn, taskiq and alembic from that virtual environment. The Docker ignore file excludes .env; supply secrets only at runtime."
         },
         {
           "title": "Single image",
@@ -247,9 +340,9 @@
     },
     {
       "filename": "compose.yaml",
-      "code": "x-app: &app\n  build: .\n  image: backend-bootcamp:dev\n  environment:\n    REDIS_URL: redis://redis:6379/0\n    DB_HOST: postgres\n    DB_PORT: \"5432\"\n    DB_NAME: appdb\n    DB_USER: appuser\n    DB_PASSWORD: local-dev-only\n    DB_SSLMODE: disable\n\nservices:\n  postgres:\n    image: postgres:17-alpine\n    environment:\n      POSTGRES_USER: appuser\n      POSTGRES_PASSWORD: local-dev-only\n      POSTGRES_DB: appdb\n    ports: [\"127.0.0.1:5432:5432\"]\n    volumes: [\"postgres-data:/var/lib/postgresql/data\"]\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U appuser -d appdb\"]\n      interval: 5s\n      timeout: 3s\n      retries: 20\n  redis:\n    image: redis:7.4-alpine\n    command: [\"redis-server\", \"--appendonly\", \"yes\"]\n    ports: [\"127.0.0.1:6379:6379\"]\n    volumes: [\"redis-data:/data\"]\n    healthcheck:\n      test: [\"CMD\", \"redis-cli\", \"ping\"]\n      interval: 5s\n      timeout: 3s\n      retries: 20\n  migrate:\n    <<: *app\n    command: [\"python\", \"-m\", \"app.migrate\"]\n    depends_on:\n      postgres: {condition: service_healthy}\n  api:\n    <<: *app\n    ports: [\"127.0.0.1:8001:8000\"]\n    depends_on:\n      migrate: {condition: service_completed_successfully}\n      redis: {condition: service_healthy}\n  worker:\n    <<: *app\n    command: [\"taskiq\", \"worker\", \"app.tasks:broker\"]\n    depends_on:\n      migrate: {condition: service_completed_successfully}\n      redis: {condition: service_healthy}\n\nvolumes:\n  postgres-data:\n  redis-data:\n",
+      "code": "x-app: &app\n  build: .\n  image: backend-bootcamp:dev\n  environment:\n    REDIS_URL: redis://redis:6379/0\n    DB_HOST: postgres\n    DB_PORT: \"5432\"\n    DB_NAME: appdb\n    DB_USER: appuser\n    DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the root .env file}\n    DB_SSLMODE: disable\n\nservices:\n  postgres:\n    image: postgres:17-alpine\n    environment:\n      POSTGRES_USER: appuser\n      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the root .env file}\n      POSTGRES_DB: appdb\n    ports: [\"127.0.0.1:5432:5432\"]\n    volumes: [\"postgres-data:/var/lib/postgresql/data\"]\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U appuser -d appdb\"]\n      interval: 5s\n      timeout: 3s\n      retries: 20\n  redis:\n    image: redis:7.4-alpine\n    command: [\"redis-server\", \"--appendonly\", \"yes\"]\n    ports: [\"127.0.0.1:6379:6379\"]\n    volumes: [\"redis-data:/data\"]\n    healthcheck:\n      test: [\"CMD\", \"redis-cli\", \"ping\"]\n      interval: 5s\n      timeout: 3s\n      retries: 20\n  migrate:\n    <<: *app\n    command: [\"alembic\", \"upgrade\", \"head\"]\n    depends_on:\n      postgres: {condition: service_healthy}\n  api:\n    <<: *app\n    ports: [\"127.0.0.1:8001:8000\"]\n    depends_on:\n      migrate: {condition: service_completed_successfully}\n      redis: {condition: service_healthy}\n  worker:\n    <<: *app\n    command: [\"taskiq\", \"worker\", \"app.tasks:broker\"]\n    depends_on:\n      migrate: {condition: service_completed_successfully}\n      redis: {condition: service_healthy}\n\nvolumes:\n  postgres-data:\n  redis-data:\n",
       "language": "yaml",
-      "description": "Healthy dependencies, a one-shot migration, then API and worker.",
+      "description": "Run migrations before API/worker; read the local database password from .env with required interpolation.",
       "walkthrough": [
         {
           "title": "Service DNS",
@@ -262,12 +355,16 @@
         {
           "title": "Ports and volumes",
           "explanation": "The API uses host port 8001 to avoid colliding with the course reader on 8000. Named volumes persist data after docker compose down; down -v deletes them."
+        },
+        {
+          "title": "Required secret interpolation",
+          "explanation": "Compose reads DB_PASSWORD from the root .env or process environment and passes it to both PostgreSQL and application containers. The :? expression stops startup if it is absent or empty; changing .env does not rotate the password in an existing database volume."
         }
       ]
     }
   ],
-  "svgDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 460\" role=\"img\" aria-label=\"Local application process and data flow\" class=\"course-diagram\"><title>Local application process and data flow</title><defs><marker id=\"graph-arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"15\" y=\"45\" width=\"930\" height=\"160\" rx=\"14\" class=\"diagram-boundary\"/><text x=\"31\" y=\"70\" class=\"diagram-group\">SEPARATE PROCESSES · API + WORKER SHARE SOURCE, NOT CONNECTIONS</text><path d=\"M270,138 L360,138\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"315\" y=\"120\" class=\"diagram-edge-label\" text-anchor=\"middle\">Produce job</text><path d=\"M690,138 L600,138\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"645\" y=\"120\" class=\"diagram-edge-label\" text-anchor=\"middle\">Consume</text><path d=\"M150,176 L150,378 L360,378\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"220\" y=\"285\" class=\"diagram-edge-label\" text-anchor=\"middle\">Read completed rows</text><path d=\"M810,176 L810,270 L480,270 L480,340\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"635\" y=\"260\" class=\"diagram-edge-label\" text-anchor=\"middle\">Write result</text><path d=\"M690,378 L600,378\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"645\" y=\"360\" class=\"diagram-edge-label\" text-anchor=\"middle\">Create schema</text><rect x=\"30\" y=\"100\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"150.0\" y=\"131\" text-anchor=\"middle\" class=\"diagram-title\">FastAPI process</text><text x=\"150.0\" y=\"153\" text-anchor=\"middle\" class=\"diagram-detail\">Pydantic + async pool</text><rect x=\"360\" y=\"100\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"480.0\" y=\"131\" text-anchor=\"middle\" class=\"diagram-title\">Redis stream</text><text x=\"480.0\" y=\"153\" text-anchor=\"middle\" class=\"diagram-detail\">Messages + acknowledgement</text><rect x=\"690\" y=\"100\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"810.0\" y=\"131\" text-anchor=\"middle\" class=\"diagram-title\">TaskIQ process</text><text x=\"810.0\" y=\"153\" text-anchor=\"middle\" class=\"diagram-detail\">Same image · different command</text><rect x=\"360\" y=\"340\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"480.0\" y=\"371\" text-anchor=\"middle\" class=\"diagram-title\">PostgreSQL</text><text x=\"480.0\" y=\"393\" text-anchor=\"middle\" class=\"diagram-detail\">job_logs · primary-key dedupe</text><rect x=\"690\" y=\"340\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"810.0\" y=\"371\" text-anchor=\"middle\" class=\"diagram-title\">Migration process</text><text x=\"810.0\" y=\"393\" text-anchor=\"middle\" class=\"diagram-detail\">One-shot schema setup</text></svg>",
-  "architectureDescription": "The API and worker are separate processes from one image. Both reach PostgreSQL; only the API produces jobs and only workers consume them. Redis-compatible Streams decouple their lifetimes.",
+  "svgDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 460\" role=\"img\" aria-label=\"Local application process and data flow\" class=\"course-diagram\"><title>Local application process and data flow</title><defs><marker id=\"graph-arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"15\" y=\"45\" width=\"930\" height=\"160\" rx=\"14\" class=\"diagram-boundary\"/><text x=\"31\" y=\"70\" class=\"diagram-group\">SEPARATE PROCESSES · API + WORKER SHARE SOURCE, NOT CONNECTIONS</text><path d=\"M270,138 L360,138\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"315\" y=\"120\" class=\"diagram-edge-label\" text-anchor=\"middle\">Produce job</text><path d=\"M690,138 L600,138\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"645\" y=\"120\" class=\"diagram-edge-label\" text-anchor=\"middle\">Consume</text><path d=\"M150,176 L150,378 L360,378\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"220\" y=\"285\" class=\"diagram-edge-label\" text-anchor=\"middle\">Read completed rows</text><path d=\"M810,176 L810,270 L480,270 L480,340\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"635\" y=\"260\" class=\"diagram-edge-label\" text-anchor=\"middle\">Write result</text><path d=\"M690,378 L600,378\" class=\"diagram-arrow\" marker-end=\"url(#graph-arrow)\"/><text x=\"645\" y=\"360\" class=\"diagram-edge-label\" text-anchor=\"middle\">Apply revisions</text><rect x=\"30\" y=\"100\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"150.0\" y=\"131\" text-anchor=\"middle\" class=\"diagram-title\">FastAPI process</text><text x=\"150.0\" y=\"153\" text-anchor=\"middle\" class=\"diagram-detail\">SQLAlchemy async sessions</text><rect x=\"360\" y=\"100\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"480.0\" y=\"131\" text-anchor=\"middle\" class=\"diagram-title\">Redis stream</text><text x=\"480.0\" y=\"153\" text-anchor=\"middle\" class=\"diagram-detail\">Messages + acknowledgement</text><rect x=\"690\" y=\"100\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"810.0\" y=\"131\" text-anchor=\"middle\" class=\"diagram-title\">TaskIQ process</text><text x=\"810.0\" y=\"153\" text-anchor=\"middle\" class=\"diagram-detail\">Same image · different command</text><rect x=\"360\" y=\"340\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"480.0\" y=\"371\" text-anchor=\"middle\" class=\"diagram-title\">PostgreSQL</text><text x=\"480.0\" y=\"393\" text-anchor=\"middle\" class=\"diagram-detail\">job_logs · primary-key dedupe</text><rect x=\"690\" y=\"340\" width=\"240\" height=\"76\" rx=\"9\" class=\"diagram-node\"/><text x=\"810.0\" y=\"371\" text-anchor=\"middle\" class=\"diagram-title\">Migration process</text><text x=\"810.0\" y=\"393\" text-anchor=\"middle\" class=\"diagram-detail\">Alembic upgrade head</text></svg>",
+  "architectureDescription": "The API and worker are separate processes from one image, each with its own SQLAlchemy engine. Alembic upgrades PostgreSQL before services start. Shared typed settings read local .env or injected environment variables; Redis Streams decouple API and worker lifetimes.",
   "flowDiagram": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 385\" role=\"img\" aria-label=\"Flow 2\" class=\"course-diagram\"><title>Flow 2</title><defs><marker id=\"arrow-Flow2\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0,0 L8,4 L0,8\" fill=\"currentColor\"/></marker></defs><rect x=\"25\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">POST /enqueue</text><text x=\"145\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Validate JSON</text><rect x=\"300\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Queue job</text><text x=\"420\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Stable job_id</text><rect x=\"575\" y=\"35\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"69\" text-anchor=\"middle\" class=\"diagram-title\">Return 202</text><text x=\"695\" y=\"91\" text-anchor=\"middle\" class=\"diagram-detail\">Do not wait for work</text><rect x=\"575\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"695\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Worker consumes</text><text x=\"695\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Simulated slow I/O</text><rect x=\"300\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"420\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">Commit result</text><text x=\"420\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">ON CONFLICT by job_id</text><rect x=\"25\" y=\"190\" width=\"240\" height=\"94\" rx=\"10\" class=\"diagram-node\"/><text x=\"145\" y=\"224\" text-anchor=\"middle\" class=\"diagram-title\">GET /jobs</text><text x=\"145\" y=\"246\" text-anchor=\"middle\" class=\"diagram-detail\">Read completed results</text><path d=\"M265,82 L300,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow2)\"/><path d=\"M540,82 L575,82\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow2)\"/><path d=\"M695,129 L695,190\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow2)\"/><path d=\"M575,237 L540,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow2)\"/><path d=\"M300,237 L265,237\" class=\"diagram-arrow\" marker-end=\"url(#arrow-Flow2)\"/></svg>",
   "flowDescription": "POST /enqueue → Queue job → Return 202 → Worker consumes → Commit result → GET /jobs.",
   "breakItDrill": {
@@ -277,16 +374,18 @@
     "fix": "Start the worker again and verify the same job ID reaches PostgreSQL. Do not confuse a queue acceptance response with completion."
   },
   "assignment": {
-    "title": "Test idempotent persistence",
-    "description": "Invoke the registered task twice with the same job_id using a local test script; query the database and explain why only one row is stored. Then explain why repeating an HTTP request is a different case.",
-    "completionHint": "Verify the result yourself, then complete the chapter checklist."
+    "title": "Evolve the schema and verify persistence",
+    "description": "Complete the nullable note-column migration exercise, verify existing jobs survive upgrade, and practice downgrade/re-upgrade only on your disposable database. Invoke process_ai_job twice with one job_id and query PostgreSQL to prove one row remains. Explain .env/environment precedence and why a repeated HTTP request creates a different ID. Commit the model, reviewed migration, and updated lockfile together; keep .env untracked.",
+    "completionHint": "Verify alembic current reports head, alembic check finds no pending schema changes, and /jobs returns completed results."
   },
   "recallNote": {
-    "keyTakeaway": "Use typed boundaries, asynchronous I/O, and an explicit lifecycle; keep accepted work separate from completed work.",
+    "keyTakeaway": "SQLAlchemy handles data access and transactions; Alembic versions the schema; typed settings load secrets without committing them.",
     "bullets": [
       "API: `uvicorn app.main:app`; worker: `taskiq worker app.tasks:broker`.",
       "Containers share an image, not an event loop or database connection.",
-      "Commit uv.lock; build with --locked; keep development dependencies out of runtime."
+      "Commit uv.lock; build with --locked; keep development dependencies out of runtime.",
+      "Run `alembic upgrade head` once before services; review generated migrations before applying them.",
+      "Use a fresh async session for each request/job; process environment overrides .env; DB_PASSWORD is required."
     ]
   },
   "badgeTone": "amber",
@@ -304,12 +403,24 @@
       "url": "https://github.com/taskiq-python/taskiq-redis"
     },
     {
-      "label": "Psycopg pools",
-      "url": "https://www.psycopg.org/psycopg3/docs/advanced/pool.html"
-    },
-    {
       "label": "uv in Docker",
       "url": "https://docs.astral.sh/uv/guides/integration/docker/"
+    },
+    {
+      "label": "SQLAlchemy async sessions (2.0)",
+      "url": "https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html"
+    },
+    {
+      "label": "Alembic async migration environment",
+      "url": "https://alembic.sqlalchemy.org/en/latest/cookbook.html#using-asyncio-with-alembic"
+    },
+    {
+      "label": "Reviewing autogenerated migrations",
+      "url": "https://alembic.sqlalchemy.org/en/latest/autogenerate.html"
+    },
+    {
+      "label": "Pydantic Settings .env support",
+      "url": "https://docs.pydantic.dev/latest/concepts/pydantic_settings/#dotenv-env-support"
     }
   ],
   "checklist": [
@@ -323,11 +434,11 @@
     },
     {
       "id": "w1-c3",
-      "text": "Trace a JSON request through the queue into PostgreSQL."
+      "text": "Persist and query jobs through SQLAlchemy; apply and inspect Alembic revisions."
     },
     {
       "id": "w1-c4",
-      "text": "Test behavior and build an image from a real uv.lock."
+      "text": "Load secrets from .env, verify settings/tests, and package migrations in a locked container."
     }
   ]
 }
